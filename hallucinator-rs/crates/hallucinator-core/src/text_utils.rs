@@ -399,6 +399,21 @@ pub fn extract_doi(text: &str) -> Option<String> {
         Lazy::new(|| Regex::new(r"(10\.\d{4,}/[^\s\]>,]+\.)\s+(\d{1,9})\.?\s*$").unwrap());
     let text_fixed = FIX1C.replace_all(&text_fixed, "$1$2");
 
+    // Pattern 1d: Springer/LNCS-style book-chapter DOIs end in `_NN`
+    // (the chapter number, e.g. `10.1007/978-3-032-06155-3_10`). Some
+    // PDF fonts don't have a glyph mapping for `_` in that context, so
+    // extraction renders it as literal whitespace instead — the DOI
+    // comes through as `10.1007/978-3-032-06155-3 10` and the trailing
+    // chapter number gets dropped entirely (issue #331). Unlike FIX1B
+    // (an actual newline split), this joins a same-line space, so it's
+    // restored as `_` rather than concatenated directly. Anchored to
+    // the end of the string (with optional trailing period), mirroring
+    // FIX1C, so a genuine page number or year following a complete DOI
+    // is never glued on.
+    static FIX1D: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(10\.\d{4,}/[^\s\]>,]+\d)[ \t]+(\d{1,3})\.?\s*$").unwrap());
+    let text_fixed = FIX1D.replace_all(&text_fixed, "${1}_$2");
+
     // Pattern 2: DOI ending with dash + newline + continuation
     static FIX2: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(10\.\d{4,}/[^\s\]>,]+-)\s*\n\s*(\S+)").unwrap());
@@ -605,6 +620,34 @@ mod tests {
         assert_eq!(
             extract_doi("doi:10.1109/TFOO.2020.1234567. Accessed 2021 via IEEE Xplore"),
             Some("10.1109/TFOO.2020.1234567".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_doi_underscore_lost_as_space() {
+        // Springer/LNCS book-chapter DOIs end in `_NN` (the chapter
+        // number). Some PDF fonts render that underscore as literal
+        // whitespace, so extraction drops it entirely instead of
+        // producing a real line-wrap (issue #331).
+        assert_eq!(
+            extract_doi("Available: https://doi.org/10.1007/978-3-032-06155-3 10"),
+            Some("10.1007/978-3-032-06155-3_10".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_doi_underscore_lost_as_space_bare() {
+        assert_eq!(
+            extract_doi("doi:10.1007/978-3-032-06155-3 10."),
+            Some("10.1007/978-3-032-06155-3_10".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_doi_underscore_fix_does_not_glue_unrelated_trailing_text() {
+        assert_eq!(
+            extract_doi("doi:10.1145/3442381.3450048 see page 12 for details"),
+            Some("10.1145/3442381.3450048".into())
         );
     }
 
