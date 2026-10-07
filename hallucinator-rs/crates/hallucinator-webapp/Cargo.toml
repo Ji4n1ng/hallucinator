@@ -1,0 +1,60 @@
+# Fork-only crate: multi-user web interface for hallucinator.
+#
+# Deliberately a *standalone* workspace (note the empty `[workspace]` table)
+# rather than a member of `hallucinator-rs/Cargo.toml`, so merging upstream
+# never touches this crate and this crate never touches upstream's
+# `Cargo.toml` / `Cargo.lock`. It depends on the upstream crates by path only.
+[package]
+name = "hallucinator-webapp"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Multi-user web interface (auth, history, bib support, DB management) for hallucinated reference detection"
+publish = false
+
+[workspace]
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+hallucinator-core = { path = "../hallucinator-core" }
+hallucinator-ingest = { path = "../hallucinator-ingest" }
+hallucinator-reporting = { path = "../hallucinator-reporting" }
+hallucinator-dblp = { path = "../hallucinator-dblp" }
+hallucinator-acl = { path = "../hallucinator-acl" }
+hallucinator-arxiv-offline = { path = "../hallucinator-arxiv-offline" }
+hallucinator-iacr-eprint = { path = "../hallucinator-iacr-eprint" }
+hallucinator-openalex = { path = "../hallucinator-openalex" }
+hallucinator-local-corpus = { path = "../hallucinator-local-corpus" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "process", "io-util", "fs"] }
+tokio-util = "0.7"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+async-channel = "2"
+axum = { version = "0.8", features = ["multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Must stay on the same major as the workspace (`links = "sqlite3"`).
+rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+rapidfuzz = "0.5"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+dirs = "6"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+debug = false

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hallucinator</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="sr-only" href="#app">Skip to content</a>
+
+  <header class="topnav">
+    <div class="topnav-inner">
+      <button type="button" class="btn-icon nav-toggle" id="nav-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="navlinks">&#9776;</button>
+      <a class="brand" href="#/">
+        <img src="/static/logo.svg" alt="">
+        <span>Hallucinator</span>
+      </a>
+      <nav class="navlinks" id="navlinks" aria-label="Main">
+        <a class="navlink" href="#/" data-route="new">New check</a>
+        <a class="navlink" href="#/history" data-route="history">History</a>
+        <a class="navlink" href="#/databases" data-route="databases">Databases</a>
+        <a class="navlink hidden" href="#/admin" data-route="admin" id="nav-admin">Admin</a>
+      </nav>
+      <div class="nav-right">
+        <button type="button" class="user-pill" id="user-pill" aria-haspopup="menu" aria-expanded="false" aria-controls="user-menu">
+          <span class="avatar" id="user-avatar">?</span>
+          <span class="uname truncate" id="user-name">…</span>
+        </button>
+        <div class="menu hidden" id="user-menu" role="menu" aria-labelledby="user-pill">
+          <div class="menu-label" id="user-menu-label"></div>
+          <a class="menu-item" role="menuitem" href="#/account">Account</a>
+          <a class="menu-item hidden" role="menuitem" href="#/admin" id="menu-admin">Admin</a>
+          <div class="menu-sep" role="separator"></div>
+          <button type="button" class="menu-item" role="menuitem" id="btn-signout">Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main id="app" tabindex="-1" aria-live="polite" aria-busy="true">
+    <div class="container page">
+      <div class="skel skel-block"></div>
+      <div class="skel skel-line"></div>
+      <div class="skel skel-line"></div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <span><strong>Hallucinator</strong> — detections are leads to verify by hand, not proof.</span>
+      <span>Self-hosted web interface for the hallucinated reference detector.</span>
+    </div>
+  </footer>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+  <div id="overlay-root"></div>
+</body>
+</html>
