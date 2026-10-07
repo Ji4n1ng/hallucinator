@@ -132,7 +132,7 @@ pub fn extract_references_from_bbl_str(content: &str) -> Result<ExtractionResult
             authors,
             doi,
             arxiv_id,
-            urls: vec![],
+            urls: hallucinator_core::extract_urls(entry),
             original_number: raw_idx + 1,
             skip_reason: None,
         });
@@ -333,7 +333,7 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
             authors,
             doi,
             arxiv_id,
-            urls: vec![],
+            urls: bib_entry_urls(entry),
             original_number: raw_idx + 1,
             skip_reason: None,
         });
@@ -702,6 +702,24 @@ fn apply_accent(accent: &str, letter: &str) -> String {
         ("~", "o") => "õ".to_string(),
         _ => letter.to_string(), // Unknown accent, just return the letter
     }
+}
+
+/// URLs carried by a .bib entry — the `url` field, or `\url{…}` inside
+/// `howpublished` / `note` (common for @misc web citations). Run through
+/// `extract_urls` so academic domains are dropped exactly as for PDF input,
+/// leaving only what the URL-liveness fallback should check.
+fn bib_entry_urls(entry: &biblatex::Entry) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    for field in ["url", "howpublished", "note"] {
+        if let Some(chunks) = entry.get(field) {
+            for url in hallucinator_core::extract_urls(&chunks_to_string(chunks)) {
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+        }
+    }
+    urls
 }
 
 #[cfg(test)]
@@ -1121,5 +1139,49 @@ Second entry content.
                 result.err()
             );
         }
+    }
+
+    #[test]
+    fn test_bib_entry_urls_are_extracted() {
+        let bib = r#"
+@misc{guard,
+  title = {Llama Guard: LLM-based Input-Output Safeguard for Human-AI Conversations},
+  author = {Inan, Hakan},
+  howpublished = {\url{https://github.com/meta-llama/PurpleLlama}},
+  url = {https://ai.meta.com/research/publications/llama-guard/}
+}
+@article{paper,
+  title = {Deep Residual Learning for Image Recognition},
+  author = {He, Kaiming},
+  url = {https://arxiv.org/abs/1512.03385}
+}
+"#;
+        let result = extract_references_from_bib_str(bib).unwrap();
+        assert_eq!(
+            result.references[0].urls,
+            vec![
+                "https://ai.meta.com/research/publications/llama-guard/".to_string(),
+                "https://github.com/meta-llama/PurpleLlama".to_string(),
+            ]
+        );
+        // Academic domains are handled by dedicated backends, not URL checks.
+        assert!(result.references[1].urls.is_empty());
+    }
+
+    #[test]
+    fn test_bbl_entry_urls_are_extracted() {
+        let bbl = r#"
+\begin{thebibliography}{1}
+\bibitem[Author(2024)]{x}
+\bibfield{author}{\bibinfo{person}{A. Author}.} \bibinfo{year}{2024}\natexlab{}.
+\newblock \bibinfo{title}{An Example Tool for Doing Useful Things}.
+\newblock \urldef\tempurl \url{https://github.com/example/tool}
+\end{thebibliography}
+"#;
+        let result = extract_references_from_bbl_str(bbl).unwrap();
+        assert_eq!(
+            result.references[0].urls,
+            vec!["https://github.com/example/tool".to_string()]
+        );
     }
 }
