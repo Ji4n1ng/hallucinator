@@ -19,7 +19,7 @@ mod runs;
 mod state;
 mod store;
 
-use state::{AppState, Settings, SignupMode};
+use state::{AppState, Settings};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Web interface for hallucinated reference detection")]
@@ -42,17 +42,6 @@ struct Cli {
     /// CLI/TUI — ~/.config/hallucinator/config.toml overlaid by ./.hallucinator.toml).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
-
-    /// Who may create accounts. The very first account is always allowed
-    /// and becomes the administrator.
-    #[arg(
-        long,
-        env = "HALLUCINATOR_WEB_SIGNUP",
-        value_enum,
-        default_value = "approval",
-        global = true
-    )]
-    signup: SignupMode,
 
     /// Mark the session cookie `Secure` (set when served over HTTPS).
     #[arg(long, env = "HALLUCINATOR_WEB_SECURE_COOKIES", global = true)]
@@ -217,7 +206,6 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = Settings {
         data_dir: data_dir.clone(),
-        signup: cli.signup,
         secure_cookies: cli.secure_cookies,
         trust_proxy: cli.trust_proxy,
         max_concurrent_runs: cli.max_concurrent_runs,
@@ -266,7 +254,8 @@ async fn main() -> anyhow::Result<()> {
 
     if store.count_users()? == 0 {
         tracing::info!(
-            "no accounts yet — open the web UI and create the first account (it becomes the administrator)"
+            "no accounts yet — create the administrator with \
+             `hallucinator-webapp create-user --username <name> --admin`"
         );
     }
 

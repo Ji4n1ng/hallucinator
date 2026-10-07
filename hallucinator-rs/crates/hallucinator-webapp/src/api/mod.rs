@@ -231,7 +231,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     let upload_limit = DefaultBodyLimit::max(state.settings.max_upload_bytes);
     let api = Router::new()
         .route("/auth/me", get(auth::me))
-        .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/password", post(auth::change_password))

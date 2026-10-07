@@ -2,7 +2,7 @@
 
 Contract between the Rust server (`src/`) and the browser client (`static/`).
 All JSON. Timestamps are **unix seconds** (integers). All `/api/*` routes
-except the auth bootstrap ones require a session cookie.
+except `GET /api/auth/me` and `POST /api/auth/login` require a session cookie.
 
 ## Conventions
 
@@ -10,8 +10,8 @@ except the auth bootstrap ones require a session cookie.
   reads it.
 - **CSRF**: every non-GET request to `/api/*` must send header
   `X-CSRF-Token: <csrf>` where `<csrf>` comes from `GET /api/auth/me`.
-  (`POST /api/auth/login` and `POST /api/auth/register` are exempt — no session
-  exists yet; they are protected by an Origin check instead.)
+  (`POST /api/auth/login` is exempt — no session exists yet; it is protected
+  by an Origin check instead.)
 - **Errors**: non-2xx responses carry `{"error": "<human readable message>"}`.
   `401` → not signed in (client redirects to `/login`), `403` → forbidden,
   `429` → rate limited / locked out (also sets `Retry-After` seconds header and
@@ -38,23 +38,17 @@ The app shell is a hash-routed SPA:
 {
   "user": User | null,
   "csrf": "string | null",
-  "signup_mode": "open" | "approval" | "closed",
-  "bootstrap": true        // no users exist yet: first account becomes admin
+  "bootstrap": true        // no users exist yet: create the admin with `create-user --admin`
 }
 ```
+There is no self sign-up: accounts are created by administrators
+(`POST /api/admin/users`, or `hallucinator-webapp create-user` on the server).
 `User = {"id":1,"username":"alice","role":"admin"|"user","status":"active"|"pending"|"disabled","created_at":0,"last_login_at":0|null}`
-
-### `POST /api/auth/register`  `{"username","password"}`
-- username: `^[A-Za-z0-9_.-]{3,32}$`; password: 10–256 chars.
-- `201 {"user": User, "message": "..."}`. When `user.status == "pending"`
-  the account waits for admin approval and **no session is created**;
-  otherwise the response also sets the session cookie (auto sign-in).
-- `409` username taken, `403` sign-up closed, `429` too many sign-ups from this IP.
 
 ### `POST /api/auth/login`  `{"username","password"}`
 - `200 {"user": User}` + session cookie.
 - `401 {"error":"Invalid username or password."}` (generic, never reveals which).
-- `403` account pending approval / disabled (only after a correct password).
+- `403` account disabled or pending (only after a correct password).
 - `429 {"error":"Too many failed sign-in attempts. Try again in 15 minutes.","retry_after":900}`
   — per-account lockout (5 failures / 15 min, doubling on repeat lockouts, max 24 h)
   or per-IP block (20 failures / 15 min → 30 min block).
@@ -266,4 +260,4 @@ Imports every reference marked safe in the run history into the local corpus.
 - `POST /api/admin/users` `{"username","password","role"}` → `201 {"user":User}`
 - `DELETE /api/admin/users/:id` → `204` (cannot delete yourself)
 - `DELETE /api/admin/ip-blocks/:ip` → `204` (lift an IP block early)
-- `GET /api/admin/auth-events?limit=100` → `{"events":[{"id":1,"at":0,"ip":"1.2.3.4","username":"bob","kind":"login_ok|login_fail|login_blocked|lockout|signup|logout|ip_block","detail":null}],"blocked_ips":[{"ip":"1.2.3.4","until":0}]}`
+- `GET /api/admin/auth-events?limit=100` → `{"events":[{"id":1,"at":0,"ip":"1.2.3.4","username":"bob","kind":"login_ok|login_fail|login_blocked|lockout|logout|ip_block","detail":null}],"blocked_ips":[{"ip":"1.2.3.4","until":0}]}`

@@ -11,10 +11,10 @@ stays conflict-free.
   GROBID `.xml` or `.zip`/`.tar.gz` archives and watch every reference being
   checked live, per paper and per database. It uses the same engine and
   config as the CLI/TUI.
-- **Accounts with brute-force protection**: sign-up/sign-in, admin approval,
-  and an account lockout after 5 failed attempts that grows on repeats.
-  Unknown usernames are locked the same way. An IP is blocked after 20
-  failures, and sign-ups are rate-limited.
+- **Accounts with brute-force protection**: no self sign-up; administrators
+  create accounts (Admin page or `create-user`). An account locks after 5
+  failed sign-ins, longer on repeats, and unknown usernames lock the same
+  way. An IP is blocked after 20 failures.
 - **PDF + `.bib` merging**: the PDF decides which references are cited, and
   the `.bib` fills in the titles, authors, DOIs and URLs the PDF parser
   missed. `.bib`/`.bbl` entries now keep their URLs, so the URL fallback works

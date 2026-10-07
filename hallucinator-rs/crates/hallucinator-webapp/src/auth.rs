@@ -39,7 +39,6 @@ pub struct LoginPolicy {
     pub ip_threshold: i64,
     pub ip_window_secs: i64,
     pub ip_block_secs: i64,
-    pub signup_per_ip_per_hour: i64,
 }
 
 impl Default for LoginPolicy {
@@ -51,7 +50,6 @@ impl Default for LoginPolicy {
             ip_threshold: 20,
             ip_window_secs: 15 * 60,
             ip_block_secs: 30 * 60,
-            signup_per_ip_per_hour: 5,
         }
     }
 }

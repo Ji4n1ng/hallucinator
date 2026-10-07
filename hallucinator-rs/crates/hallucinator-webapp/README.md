@@ -18,11 +18,12 @@ cargo build --release -p hallucinator-cli
 # 2. The web app
 cd crates/hallucinator-webapp
 cargo build --release
+HALLUCINATOR_WEB_PASSWORD=… ./target/release/hallucinator-webapp create-user --username alice --admin
 ./target/release/hallucinator-webapp            # http://127.0.0.1:5001
 ```
 
-Open the page and **create the first account — it becomes the
-administrator**. Later sign-ups wait for approval by default (`--signup`).
+There is no self sign-up: **create the first administrator from the shell**
+(above), then add further accounts on the Admin page.
 
 The app reads the same configuration as the CLI/TUI
 (`~/.config/hallucinator/config.toml`, overlaid by `./.hallucinator.toml`):
@@ -37,7 +38,6 @@ databases not named in the config are auto-detected in
 | `--bind` / `HALLUCINATOR_WEB_BIND` | `127.0.0.1:5001` | listen address |
 | `--data-dir` / `HALLUCINATOR_WEB_DATA` | `~/.local/share/hallucinator/webapp` | accounts, history (`webapp.db`), query cache |
 | `--config` | auto | hallucinator `config.toml` |
-| `--signup open\|approval\|closed` | `approval` | who may create accounts |
 | `--secure-cookies` | off | set when served over HTTPS |
 | `--trust-proxy` | off | use `X-Forwarded-For` for rate limiting (only behind your own proxy) |
 | `--cli-path` / `HALLUCINATOR_CLI` | auto | `hallucinator-cli` binary for DB jobs |
@@ -83,20 +83,21 @@ For anything beyond localhost put it behind a TLS reverse proxy and run with
   run updates and local-corpus imports (venue program pages, or every
   reference marked safe in the history) with a live log, and clear the query
   cache. Databases are reloaded automatically when a job finishes.
-- **Accounts** — sign-up/sign-in, admin approval, roles, password change.
+- **Accounts** — created by administrators only (Admin page or
+  `create-user`); roles, disabling, password change.
 
 ## Security
 
 - Argon2id password hashes; sessions are random 256-bit tokens stored only as
   SHA-256 hashes; `HttpOnly; SameSite=Lax` cookie (+ `Secure` with
   `--secure-cookies`); per-session CSRF token required on every state-changing
-  API call; Origin check on sign-in/sign-up.
+  API call; Origin check on sign-in.
 - **Brute-force protection**: 5 consecutive failures lock an account for 15
   minutes, doubling per repeated lockout up to 24 h (the password is not even
   verified while locked, so a locked account is no oracle); unknown usernames
   lock out identically so lockouts don't reveal which accounts exist; 20
-  failures from one IP within 15 minutes block that IP for 30 minutes; at most
-  5 sign-ups per IP per hour; generic error messages and equal-cost
+  failures from one IP within 15 minutes block that IP for 30 minutes;
+  generic error messages and equal-cost
   verification for unknown users. Admins see the sign-in audit log and can
   unlock accounts / unblock IPs.
 - Strict CSP (no inline script), `nosniff`, `frame-ancestors 'none'`; the UI

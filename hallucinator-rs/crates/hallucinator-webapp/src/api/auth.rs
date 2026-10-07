@@ -10,10 +10,10 @@ use serde_json::json;
 use super::{ApiError, ApiResult};
 use crate::auth::{
     self, AuthUser, ClientIp, clear_session_cookie, hash_password_async, hash_token, minutes_text,
-    random_token, session_cookie, validate_password, validate_username, verify_password_async,
+    random_token, session_cookie, validate_password, verify_password_async,
 };
-use crate::state::{AppState, SignupMode};
-use crate::store::{StoreError, User, now};
+use crate::state::AppState;
+use crate::store::{User, now};
 
 #[derive(Deserialize)]
 pub struct Credentials {
@@ -30,7 +30,8 @@ pub async fn me(
     Ok(Json(json!({
         "user": session.as_ref().map(|(_, s)| &s.user),
         "csrf": session.as_ref().map(|(_, s)| &s.csrf_token),
-        "signup_mode": state.settings.signup.as_str(),
+        // No accounts yet: the administrator is created from the shell
+        // (`hallucinator-webapp create-user --admin`); the sign-in page says so.
         "bootstrap": bootstrap,
     })))
 }
@@ -61,81 +62,6 @@ fn start_session(
         state.settings.secure_cookies,
     ))
     .map_err(|e| anyhow::anyhow!(e).into())
-}
-
-pub async fn register(
-    State(state): State<Arc<AppState>>,
-    ClientIp(ip): ClientIp,
-    headers: HeaderMap,
-    Json(body): Json<Credentials>,
-) -> ApiResult<Response> {
-    if !auth::origin_allowed(&headers) {
-        return Err(ApiError::forbidden("Cross-origin request rejected."));
-    }
-    let username = body.username.trim().to_string();
-    validate_username(&username).map_err(ApiError::bad_request)?;
-    validate_password(&body.password).map_err(ApiError::bad_request)?;
-
-    let bootstrap = state.store.count_users()? == 0;
-    if !bootstrap && state.settings.signup == SignupMode::Closed {
-        return Err(ApiError::forbidden(
-            "Sign-up is closed. Ask an administrator for an account.",
-        ));
-    }
-    if let Some(until) = state.store.ip_blocked_until(&ip)? {
-        return Err(ApiError::too_many(
-            "Too many requests from your network. Try again later.",
-            until - now(),
-        ));
-    }
-    let policy = &state.settings.policy;
-    if state.store.count_auth_events(&ip, "signup", now() - 3600)? >= policy.signup_per_ip_per_hour
-    {
-        return Err(ApiError::too_many(
-            "Too many accounts created from your network. Try again in an hour.",
-            3600,
-        ));
-    }
-
-    let hash = hash_password_async(body.password).await?;
-    let (role, status) = if bootstrap {
-        ("admin", "active")
-    } else if state.settings.signup == SignupMode::Approval {
-        ("user", "pending")
-    } else {
-        ("user", "active")
-    };
-    let user = match state.store.create_user(&username, &hash, role, status) {
-        Ok(u) => u,
-        Err(StoreError::Conflict) => {
-            return Err(ApiError::conflict("That username is already taken."));
-        }
-        Err(StoreError::Other(e)) => return Err(e.into()),
-    };
-    state
-        .store
-        .add_auth_event(&ip, Some(&user.username), "signup", Some(status))?;
-
-    if user.status != "active" {
-        let body = json!({
-            "user": user,
-            "message": "Account created. An administrator must approve it before you can sign in.",
-        });
-        return Ok((StatusCode::CREATED, Json(body)).into_response());
-    }
-    let cookie = start_session(&state, &user, &ip, &headers)?;
-    let message = if bootstrap {
-        "Administrator account created."
-    } else {
-        "Account created."
-    };
-    let mut resp = (
-        StatusCode::CREATED,
-        Json(json!({ "user": user, "message": message })),
-    )
-        .into_response();
-    resp.headers_mut().insert(header::SET_COOKIE, cookie);
-    Ok(resp)
 }
 
 pub async fn login(

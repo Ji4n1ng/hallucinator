@@ -9,30 +9,9 @@ use crate::refdb::RefDbRegistry;
 use crate::runs::RunManager;
 use crate::store::Store;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum SignupMode {
-    /// Anyone can create an account and use it immediately.
-    Open,
-    /// Anyone can sign up; an administrator must approve the account.
-    Approval,
-    /// Only administrators can create accounts.
-    Closed,
-}
-
-impl SignupMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SignupMode::Open => "open",
-            SignupMode::Approval => "approval",
-            SignupMode::Closed => "closed",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub data_dir: PathBuf,
-    pub signup: SignupMode,
     pub secure_cookies: bool,
     pub trust_proxy: bool,
     pub max_concurrent_runs: usize,

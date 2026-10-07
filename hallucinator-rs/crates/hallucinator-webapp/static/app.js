@@ -188,7 +188,6 @@
   const S = {
     user: null,
     csrf: null,
-    signupMode: "closed",
     options: null, // cached /api/options
   };
 
@@ -714,7 +713,6 @@
     if (!me || !me.user) { toLogin(false); return; }
     S.user = me.user;
     S.csrf = me.csrf;
-    S.signupMode = me.signup_mode;
     setupShell();
     window.addEventListener("hashchange", route);
     route();
@@ -2320,7 +2318,7 @@
 
     root.appendChild(h("div", { class: "container page" },
       h("div", { class: "page-head" },
-        h("div", null, h("h1", { class: "heading-lg" }, "Admin"), h("p", { class: "muted" }, `Users, approvals and sign-in security. Sign-up mode: ${S.signupMode}.`))),
+        h("div", null, h("h1", { class: "heading-lg" }, "Admin"), h("p", { class: "muted" }, "Accounts and sign-in security. Only administrators can create accounts."))),
       h("section", null, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Users"), h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: () => loadUsers() }, "Refresh")), usersEl),
       h("section", { class: "section" }, createForm),
       h("section", { class: "section" },

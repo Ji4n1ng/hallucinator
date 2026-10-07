@@ -19,17 +19,12 @@
     </a>
 
     <section class="card auth-card" aria-labelledby="auth-heading">
-      <h1 id="auth-heading" class="sr-only">Sign in to Hallucinator</h1>
-
-      <div class="seg-tabs" role="tablist" aria-label="Account">
-        <button type="button" class="seg-tab" role="tab" id="tab-signin" aria-selected="true" aria-controls="form-signin">Sign in</button>
-        <button type="button" class="seg-tab hidden" role="tab" id="tab-signup" aria-selected="false" aria-controls="form-signup">Create account</button>
-      </div>
+      <h1 id="auth-heading" class="auth-title">Sign in</h1>
 
       <div id="notice" class="banner banner-info hidden" role="status" aria-live="polite"></div>
       <div id="lockout" class="lockout hidden" role="alert" aria-live="assertive"></div>
 
-      <form id="form-signin" role="tabpanel" aria-labelledby="tab-signin" novalidate>
+      <form id="form-signin" novalidate>
         <label class="field">
           <span>Username</span>
           <input class="input" id="si-username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required>
@@ -42,26 +37,7 @@
         <button class="btn btn-primary" id="si-submit" type="submit">Sign in</button>
       </form>
 
-      <form id="form-signup" class="hidden" role="tabpanel" aria-labelledby="tab-signup" novalidate>
-        <div id="su-note" class="banner banner-info hidden"></div>
-        <label class="field">
-          <span>Username</span>
-          <input class="input" id="su-username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required minlength="3" maxlength="32">
-          <small class="field-hint">3–32 characters: letters, digits, <code>_</code> <code>.</code> <code>-</code></small>
-        </label>
-        <label class="field">
-          <span>Password</span>
-          <input class="input" id="su-password" name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="256">
-          <div class="pw-meter" aria-hidden="true"><div id="su-meter"></div></div>
-          <small class="field-hint">At least 10 characters.</small>
-        </label>
-        <label class="field">
-          <span>Confirm password</span>
-          <input class="input" id="su-password2" name="password2" type="password" autocomplete="new-password" required>
-        </label>
-        <p id="su-error" class="field-error hidden" role="alert"></p>
-        <button class="btn btn-primary" id="su-submit" type="submit">Create account</button>
-      </form>
+      <p class="caption auth-note">Accounts are created by an administrator.</p>
     </section>
 
     <p class="auth-foot">

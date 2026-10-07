@@ -575,6 +575,10 @@ table.compact td, table.compact th { padding: 6px 12px; }
 .banner-info { background: var(--surface); color: var(--slate); }
 .banner-success { background: var(--success-bg); color: #137a55; }
 .banner-dark { background: var(--primary); color: #fff; }
+.banner-dark code {
+  display: block; margin-top: 8px; padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.14); color: inherit; overflow-wrap: anywhere;
+}
 .banner-retracted { background: var(--error); color: #fff; }
 .paper-bar {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
@@ -675,16 +679,16 @@ table.compact td, table.compact th { padding: 6px 12px; }
 .auth-brand img { width: 40px; height: 40px; }
 .auth-brand span { font-size: 24px; font-weight: 600; letter-spacing: -0.5px; }
 .auth-card { width: min(440px, 100%); padding: var(--s-xxl); }
-.auth-card .seg-tabs { margin: calc(-1 * var(--s-sm)) 0 var(--s-xl); }
+.auth-title { font-size: 24px; line-height: 1.3; margin-bottom: var(--s-xl); }
 .auth-card form { display: flex; flex-direction: column; gap: var(--s-md); }
+.auth-card #notice:not(.hidden), .auth-card .lockout:not(.hidden) { margin-bottom: var(--s-md); }
+.auth-note { margin-top: var(--s-lg); text-align: center; }
 .auth-foot { margin-top: var(--s-xl); max-width: 440px; text-align: center; font-size: 13px; color: var(--stone); line-height: 1.7; }
 .lockout {
   background: var(--error-bg); color: #9b3434; border-radius: var(--r-lg);
   padding: var(--s-md); font-size: 14px;
 }
 .lockout .countdown { font-size: 28px; font-weight: 600; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; display: block; margin-top: 4px; }
-.pw-meter { height: 4px; border-radius: var(--r-full); background: var(--surface-soft); overflow: hidden; }
-.pw-meter > div { height: 100%; width: 0; background: var(--stone); transition: width var(--ease), background var(--ease); }
 
 /* footer */
 .footer {
