@@ -267,10 +267,29 @@ async fn main() -> anyhow::Result<()> {
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        shutdown_signal().await;
         tracing::info!("shutting down");
         shutdown.cancel();
     })
     .await?;
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM from a service manager (`systemctl stop`, `docker stop`).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(e) => tracing::warn!(error = %e, "cannot listen for SIGTERM"),
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

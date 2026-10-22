@@ -54,6 +54,27 @@ HALLUCINATOR_WEB_PASSWORD=… hallucinator-webapp create-user --username alice -
 hallucinator-webapp reset-password --username alice   # also clears lockouts
 ```
 
+### Running in the background
+
+`deploy/install-user-service.sh` installs a systemd **user** service (no
+root). The service restarts after a crash, starts at boot and keeps running
+after you log out:
+
+```bash
+cargo build --release
+deploy/install-user-service.sh 0.0.0.0:8301      # bind address; default 127.0.0.1:5001
+
+systemctl --user status hallucinator-webapp
+journalctl --user -u hallucinator-webapp -f      # logs
+systemctl --user restart hallucinator-webapp     # after rebuilding
+```
+
+To change the address, run the script again. Other flags can be set through
+their env vars in `~/.config/systemd/user/hallucinator-webapp.service`.
+Edit them there, then run `systemctl --user daemon-reload`. If `systemctl
+--user` reports `Failed to connect to bus` from a tmux or SSH shell, first
+run `export XDG_RUNTIME_DIR=/run/user/$(id -u)`.
+
 For anything beyond localhost put it behind a TLS reverse proxy and run with
 `--secure-cookies --trust-proxy`. Disable proxy buffering for
 `/api/*/events` (the app sends `X-Accel-Buffering: no` for nginx).
@@ -125,6 +146,7 @@ src/
   export.rs   exports through hallucinator-reporting
   model.rs    serde mirror of ValidationResult, stats
 static/       dependency-free UI (no build step), follows DESIGN.md
+deploy/       systemd user-service installer
 ```
 
 ## Keeping up with upstream
