@@ -52,6 +52,7 @@ Account maintenance from the shell:
 ```bash
 HALLUCINATOR_WEB_PASSWORD=… hallucinator-webapp create-user --username alice --admin
 hallucinator-webapp reset-password --username alice   # also clears lockouts
+hallucinator-webapp create-token --username agent --name "claude skill"   # prints an API token
 ```
 
 ### Running in the background
@@ -106,11 +107,17 @@ For anything beyond localhost put it behind a TLS reverse proxy and run with
   cache. Databases are reloaded automatically when a job finishes.
 - **Accounts** — created by administrators only (Admin page or
   `create-user`); roles, disabling, password change.
+- **API for scripts and agents** — personal API tokens (Account page or
+  `create-token`) sent as `Authorization: Bearer`; long-polling
+  (`?wait=<secs>`) and a compact per-reference report
+  (`GET /api/runs/:id/report`). The server documents itself at
+  `GET /api/docs` (also `/llms.txt`; source [API-GUIDE.md](API-GUIDE.md)) and
+  `GET /api/docs/reference` ([API.md](API.md)).
 
 ## Security
 
-- Argon2id password hashes; sessions are random 256-bit tokens stored only as
-  SHA-256 hashes; `HttpOnly; SameSite=Lax` cookie (+ `Secure` with
+- Argon2id password hashes; sessions and API tokens are random 256-bit
+  tokens stored only as SHA-256 hashes; `HttpOnly; SameSite=Lax` cookie (+ `Secure` with
   `--secure-cookies`); per-session CSRF token required on every state-changing
   API call; Origin check on sign-in.
 - **Brute-force protection**: 5 consecutive failures lock an account for 15
@@ -121,6 +128,11 @@ For anything beyond localhost put it behind a TLS reverse proxy and run with
   generic error messages and equal-cost
   verification for unknown users. Admins see the sign-in audit log and can
   unlock accounts / unblock IPs.
+- API tokens act with their owner's permissions and skip CSRF (browsers
+  never attach `Authorization` on their own). A wrong token is a 401 with no
+  cookie fallback. Tokens cannot sign out, change the password or manage
+  tokens, so a leaked one cannot mint more; disabling the account stops its
+  tokens. Use a non-admin account for agents.
 - Strict CSP (no inline script), `nosniff`, `frame-ancestors 'none'`; the UI
   never inserts server data as HTML; exports are served as sandboxed
   attachments; uploads are validated, kept in a temp dir only while being
@@ -135,9 +147,9 @@ For anything beyond localhost put it behind a TLS reverse proxy and run with
 
 ```
 src/
-  main.rs     flags, startup, create-user / reset-password
-  api/        HTTP routes (contract: API.md) — auth, runs, dbs, admin
-  auth.rs     hashing, sessions, CSRF, lockout policy
+  main.rs     flags, startup, create-user / reset-password / create-token
+  api/        HTTP routes (contract: API.md) — auth, tokens, runs, dbs, admin, docs
+  auth.rs     hashing, sessions, API tokens, CSRF, lockout policy
   store.rs    SQLite schema + queries (users, sessions, audit, history, jobs)
   runs.rs     check execution (ValidationPool, like the TUI backend) + SSE
   inputs.rs   upload pairing and the PDF+bib merge
@@ -146,6 +158,7 @@ src/
   export.rs   exports through hallucinator-reporting
   model.rs    serde mirror of ValidationResult, stats
 static/       dependency-free UI (no build step), follows DESIGN.md
+API-GUIDE.md  agent/script guide, served at /api/docs
 deploy/       systemd user-service installer
 ```
 

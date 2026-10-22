@@ -132,6 +132,16 @@ pub async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Every user's API tokens (never the secrets).
+pub async fn tokens(
+    State(state): State<Arc<AppState>>,
+    _admin: AdminUser,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({ "tokens": state.store.list_api_tokens(None)? }),
+    ))
+}
+
 #[derive(Deserialize)]
 pub struct EventsQuery {
     limit: Option<i64>,

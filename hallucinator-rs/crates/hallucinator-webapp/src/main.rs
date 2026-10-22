@@ -99,6 +99,18 @@ enum Command {
         #[arg(long)]
         username: String,
     },
+    /// Create an API token for scripts and agents and print it (it is
+    /// shown only once). It acts with the account's permissions.
+    CreateToken {
+        #[arg(long)]
+        username: String,
+        /// A label to tell tokens apart, e.g. "claude skill".
+        #[arg(long)]
+        name: String,
+        /// Days until the token expires (default: never).
+        #[arg(long)]
+        expires_days: Option<i64>,
+    },
 }
 
 fn read_password() -> anyhow::Result<String> {
@@ -152,6 +164,35 @@ async fn main() -> anyhow::Result<()> {
             store.unlock_user(a.user.id)?;
             store.delete_user_sessions(a.user.id, None)?;
             println!("Password reset for '{}'.", a.user.username);
+            return Ok(());
+        }
+        Some(Command::CreateToken {
+            username,
+            name,
+            expires_days,
+        }) => {
+            let a = store
+                .user_auth_by_name(&username)?
+                .ok_or_else(|| anyhow::anyhow!("no such user"))?;
+            let name = name.trim();
+            auth::validate_token_name(name).map_err(|e| anyhow::anyhow!(e))?;
+            let expires_at = match expires_days {
+                Some(d) if d < 1 => anyhow::bail!("--expires-days must be at least 1"),
+                Some(d) => Some(store::now() + d * 86400),
+                None => None,
+            };
+            let (secret, token) = auth::issue_api_token(&store, a.user.id, name, expires_at)?;
+            store.add_auth_event(
+                "cli",
+                Some(&a.user.username),
+                "token_create",
+                Some(&format!("{} ({}…)", token.name, token.prefix)),
+            )?;
+            eprintln!(
+                "Created API token '{}' for {} '{}'. It is shown only once:",
+                token.name, a.user.role, a.user.username
+            );
+            println!("{secret}");
             return Ok(());
         }
         Some(Command::Serve) | None => {}

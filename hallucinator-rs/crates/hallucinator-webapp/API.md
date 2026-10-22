@@ -1,17 +1,28 @@
 # hallucinator-webapp HTTP API
 
-Contract between the Rust server (`src/`) and the browser client (`static/`).
+Contract between the Rust server (`src/`) and its clients: the browser UI
+(`static/`) and scripts/agents using API tokens (task-oriented guide:
+[API-GUIDE.md](API-GUIDE.md), served at `GET /api/docs`).
 All JSON. Timestamps are **unix seconds** (integers). All `/api/*` routes
-except `GET /api/auth/me` and `POST /api/auth/login` require a session cookie.
+except `GET /api/auth/me`, `POST /api/auth/login` and `GET /api/docs*`
+require a session cookie or an API token.
 
 ## Conventions
 
 - **Session**: `hallu_session` cookie (HttpOnly, SameSite=Lax). The client never
   reads it.
-- **CSRF**: every non-GET request to `/api/*` must send header
-  `X-CSRF-Token: <csrf>` where `<csrf>` comes from `GET /api/auth/me`.
+- **CSRF**: every non-GET request to `/api/*` made with the session cookie must
+  send header `X-CSRF-Token: <csrf>` where `<csrf>` comes from `GET /api/auth/me`.
   (`POST /api/auth/login` is exempt — no session exists yet; it is protected
   by an Origin check instead.)
+- **API tokens**: `Authorization: Bearer hallu_…` instead of the cookie. A
+  token acts with its owner's permissions and needs no CSRF header (browsers
+  never send this header on their own). A bearer header that is wrong,
+  expired or revoked is `401` — the cookie is not tried. Tokens cannot call
+  `POST /api/auth/logout`, `POST /api/auth/password` or `/api/tokens*` (`403`).
+- **Long polling**: `GET /api/runs/:id` and `GET /api/runs/:id/report` take
+  `?wait=<secs>` (max 600): the response is held until the run is no longer
+  queued/running, or the time is up.
 - **Errors**: non-2xx responses carry `{"error": "<human readable message>"}`.
   `401` → not signed in (client redirects to `/login`), `403` → forbidden,
   `429` → rate limited / locked out (also sets `Retry-After` seconds header and
@@ -26,6 +37,7 @@ except `GET /api/auth/me` and `POST /api/auth/login` require a session cookie.
 | `GET /login` | Sign-in / create-account page (`static/login.html`). |
 | `GET /` | App shell (`static/index.html`); redirects to `/login` without a session. |
 | `GET /static/<file>` | Static assets (`app.css`, `app.js`, `login.js`, `logo.svg`). |
+| `GET /llms.txt` | Same as `GET /api/docs`. |
 
 The app shell is a hash-routed SPA:
 `#/` new check · `#/runs/<id>` run view · `#/history` · `#/databases` ·
@@ -38,9 +50,12 @@ The app shell is a hash-routed SPA:
 {
   "user": User | null,
   "csrf": "string | null",
+  "auth": "session" | "token" | null,
   "bootstrap": true        // no users exist yet: create the admin with `create-user --admin`
 }
 ```
+With an API token: `{"user":User,"csrf":null,"auth":"token","bootstrap":false}`;
+an invalid token is `401`.
 There is no self sign-up: accounts are created by administrators
 (`POST /api/admin/users`, or `hallucinator-webapp create-user` on the server).
 `User = {"id":1,"username":"alice","role":"admin"|"user","status":"active"|"pending"|"disabled","created_at":0,"last_login_at":0|null}`
@@ -56,6 +71,27 @@ There is no self sign-up: accounts are created by administrators
 ### `POST /api/auth/logout` → `204`
 ### `POST /api/auth/password` `{"current_password","new_password"}` → `204` (other sessions revoked)
 A wrong current password is `400` (never `401`, which the client treats as an expired session).
+
+## API tokens (session only)
+
+`ApiToken = {"id":1,"user_id":2,"username":"agent","name":"claude skill","prefix":"hallu_AbCd","created_at":0,"expires_at":0|null,"last_used_at":0|null,"last_used_ip":"10.0.0.5"|null}`
+The secret is returned once, at creation; only its SHA-256 is stored.
+
+- `GET /api/tokens` → `{"tokens":[ApiToken]}` (your own)
+- `POST /api/tokens` `{"name":"claude skill","expires_in_days":90|null}` →
+  `201 {"token":ApiToken,"secret":"hallu_…"}`. Name 1–64 chars; expiry 1–3650
+  days or `null` (never); at most 50 tokens per account.
+- `DELETE /api/tokens/:id` → `204` (your own; admins may revoke anyone's)
+
+Creating and revoking are logged as `token_create` / `token_revoke` auth
+events. From the shell: `hallucinator-webapp create-token --username <u>
+--name <label> [--expires-days N]` prints a new token.
+
+## Docs (public)
+
+- `GET /api/docs` — [API-GUIDE.md](API-GUIDE.md) as `text/markdown`, with
+  `{{BASE_URL}}` replaced by the URL the client used.
+- `GET /api/docs/reference` — this file.
 
 ## Configuration
 
@@ -96,7 +132,8 @@ Fields:
   matches; unmatched PDF references keep the PDF parse. With `"separate"` every
   file is checked on its own. Unpaired `.bib`/`.bbl`/`.xml` files are always
   checked on their own (all entries).
-- `201 {"run_id":"9f2c..."}`. Then open `#/runs/<id>`.
+- `201 {"run_id":"9f2c...","links":{"report":"/api/runs/9f2c.../report","detail":"/api/runs/9f2c...","events":"/api/runs/9f2c.../events","web":"/#/runs/9f2c..."}}`.
+  Then open `#/runs/<id>`.
 
 ### `GET /api/runs?q=&status=&limit=50&offset=0&all=0`
 History list (own runs; admins may pass `all=1` for everyone's).
@@ -122,7 +159,7 @@ History list (own runs; admins may pass `all=1` for everyone's).
 counts refs with `fp_reason` set. `checked` = refs with a result; `pending` =
 checkable refs without a result yet.
 
-### `GET /api/runs/:id`  → `RunDetail`
+### `GET /api/runs/:id?wait=<secs>`  → `RunDetail`
 ```json
 {
   "run": RunSummary & {"options": {...the options JSON...}},
@@ -176,6 +213,19 @@ FP reason labels (for UI): broken_parse "Broken citation parse", exists_elsewher
 "Found on Google Scholar / other source", all_timed_out "All databases timed out",
 known_good "User verified as real", non_academic "Non-academic source (RFC, legal, news, etc.)".
 
+### `GET /api/runs/:id/report?wait=<secs>&refs=problems|all|none`
+Compact view for scripts and agents (shape and verdict guide in
+[API-GUIDE.md](API-GUIDE.md)): `{"run": {id,title,status,done,created_at,
+started_at,finished_at,error,stats:Stats,needs_attention,summary,web_path},
+"papers": [{idx,filename,input_kind,companion_filename,status,error,stats,
+refs:[ReportRef]}]}`. `ReportRef` = `{idx, number, verdict
+(verified|not_found|mismatch|inconclusive|skipped|pending), needs_attention,
+reason, title, authors, raw_citation, doi, arxiv_id, urls, mismatch, source,
+found_authors, paper_url, failed_dbs, retracted, fp_reason}` with `null`,
+`false` and empty values left out. `refs=problems` (default) lists refs that
+are not_found, mismatch, inconclusive or retracted and not marked safe;
+`run.needs_attention` counts them.
+
 ### `GET /api/runs/:id/events`  (SSE)
 First message is always `snapshot` (a full `RunDetail`). Then incremental:
 
@@ -193,8 +243,8 @@ First message is always `snapshot` (a full `RunDetail`). Then incremental:
 ### `POST /api/runs/:id/cancel` → `204`
 ### `DELETE /api/runs/:id` → `204` (cancels first if running)
 ### `POST /api/runs/:id/papers/:pidx/retry`  `{"scope":"failed"|"not_found"|"problems"|"ref","ref_idx":3}`
-Re-checks refs (`failed`: refs whose result has failed DBs — only those DBs are
-re-queried; `not_found`/`problems`: full re-check; `ref`: the single ref). `202 {"queued": N}`.
+Re-checks refs (`failed`: not-found refs whose result has failed DBs — only
+those DBs are re-queried, as in the TUI; `not_found`/`problems`: full re-check; `ref`: the single ref). `202 {"queued": N}`.
 Progress arrives on the run's SSE stream (reconnect if it had ended).
 ### `PUT /api/runs/:id/papers/:pidx/refs/:ridx/fp`  `{"reason": "known_good" | null}` → `200 {"ref":Ref,"stats":Stats}`
 ### `PUT /api/runs/:id/papers/:pidx/verdict` `{"verdict":"safe"|"questionable"|null}` → `204`
@@ -260,4 +310,5 @@ Imports every reference marked safe in the run history into the local corpus.
 - `POST /api/admin/users` `{"username","password","role"}` → `201 {"user":User}`
 - `DELETE /api/admin/users/:id` → `204` (cannot delete yourself)
 - `DELETE /api/admin/ip-blocks/:ip` → `204` (lift an IP block early)
-- `GET /api/admin/auth-events?limit=100` → `{"events":[{"id":1,"at":0,"ip":"1.2.3.4","username":"bob","kind":"login_ok|login_fail|login_blocked|lockout|logout|ip_block","detail":null}],"blocked_ips":[{"ip":"1.2.3.4","until":0}]}`
+- `GET /api/admin/tokens` → `{"tokens":[ApiToken]}` (every account's)
+- `GET /api/admin/auth-events?limit=100` → `{"events":[{"id":1,"at":0,"ip":"1.2.3.4","username":"bob","kind":"login_ok|login_fail|login_blocked|lockout|logout|ip_block|token_create|token_revoke","detail":null}],"blocked_ips":[{"ip":"1.2.3.4","until":0}]}`

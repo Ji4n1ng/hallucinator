@@ -1,5 +1,5 @@
-//! SQLite persistence: users, sessions, sign-in audit trail, check history
-//! and reference-database job history.
+//! SQLite persistence: users, sessions, API tokens, sign-in audit trail,
+//! check history and reference-database job history.
 //!
 //! One connection behind a mutex (WAL mode). Every statement here is a
 //! short indexed read/write, so callers use it inline from async handlers.
@@ -42,6 +42,19 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_agent   TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           INTEGER PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    prefix       TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER,
+    last_used_at INTEGER,
+    last_used_ip TEXT
+);
+CREATE INDEX IF NOT EXISTS api_tokens_user ON api_tokens(user_id);
 
 CREATE TABLE IF NOT EXISTS auth_events (
     id       INTEGER PRIMARY KEY,
@@ -174,6 +187,30 @@ pub struct Session {
     pub csrf_token: String,
     pub expires_at: i64,
     pub last_seen_at: i64,
+}
+
+/// A personal API token as listed to its owner and admins. The secret is
+/// shown once at creation; only its SHA-256 and a short prefix are stored.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiToken {
+    pub id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub name: String,
+    pub prefix: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub last_used_at: Option<i64>,
+    pub last_used_ip: Option<String>,
+}
+
+/// What a bearer request resolves to.
+#[derive(Debug, Clone)]
+pub struct TokenAuth {
+    pub id: i64,
+    pub user: User,
+    pub expires_at: Option<i64>,
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -399,6 +436,23 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<JobRow> {
     })
 }
 
+const TOKEN_COLS: &str = "t.id, t.user_id, u.username, t.name, t.prefix, t.created_at, \
+     t.expires_at, t.last_used_at, t.last_used_ip";
+
+fn token_from_row(row: &Row<'_>) -> rusqlite::Result<ApiToken> {
+    Ok(ApiToken {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        username: row.get(2)?,
+        name: row.get(3)?,
+        prefix: row.get(4)?,
+        created_at: row.get(5)?,
+        expires_at: row.get(6)?,
+        last_used_at: row.get(7)?,
+        last_used_ip: row.get(8)?,
+    })
+}
+
 const JOB_COLS: &str = "j.id, j.user_id, u.username, j.db_key, j.action, j.label, j.argv_json, \
      j.status, j.created_at, j.finished_at, j.exit_code";
 
@@ -462,6 +516,10 @@ impl Store {
         let t = now();
         c.execute("DELETE FROM sessions WHERE expires_at < ?1", params![t])?;
         c.execute("DELETE FROM ip_blocks WHERE until < ?1", params![t])?;
+        c.execute(
+            "DELETE FROM api_tokens WHERE expires_at < ?1",
+            params![t - auth_event_retention_secs],
+        )?;
         c.execute(
             "DELETE FROM auth_events WHERE at < ?1",
             params![t - auth_event_retention_secs],
@@ -724,6 +782,102 @@ impl Store {
             params![user_id, except],
         )?;
         Ok(())
+    }
+
+    // ── API tokens ──
+
+    pub fn create_api_token(
+        &self,
+        user_id: i64,
+        name: &str,
+        token_hash: &str,
+        prefix: &str,
+        expires_at: Option<i64>,
+    ) -> Result<ApiToken> {
+        let c = self.conn();
+        c.execute(
+            "INSERT INTO api_tokens (user_id, name, token_hash, prefix, created_at, expires_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![user_id, name, token_hash, prefix, now(), expires_at],
+        )?;
+        let id = c.last_insert_rowid();
+        Ok(c.query_row(
+            &format!(
+                "SELECT {TOKEN_COLS} FROM api_tokens t JOIN users u ON u.id = t.user_id \
+                 WHERE t.id = ?1"
+            ),
+            params![id],
+            token_from_row,
+        )?)
+    }
+
+    /// Tokens of one user, or of everyone (`None`), newest first.
+    pub fn list_api_tokens(&self, user_id: Option<i64>) -> Result<Vec<ApiToken>> {
+        let c = self.conn();
+        let mut stmt = c.prepare(&format!(
+            "SELECT {TOKEN_COLS} FROM api_tokens t JOIN users u ON u.id = t.user_id \
+             WHERE ?1 IS NULL OR t.user_id = ?1 ORDER BY t.created_at DESC, t.id DESC"
+        ))?;
+        let rows = stmt
+            .query_map(params![user_id], token_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn count_api_tokens(&self, user_id: i64) -> Result<i64> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM api_tokens WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn get_api_token(&self, token_hash: &str) -> Result<Option<TokenAuth>> {
+        let c = self.conn();
+        Ok(c.query_row(
+            &format!(
+                "SELECT {USER_COLS}, t.id AS token_id, t.expires_at, t.last_used_at \
+                 FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?1"
+            ),
+            params![token_hash],
+            |row| {
+                Ok(TokenAuth {
+                    id: row.get("token_id")?,
+                    user: user_from_row(row)?,
+                    expires_at: row.get("expires_at")?,
+                    last_used_at: row.get("last_used_at")?,
+                })
+            },
+        )
+        .optional()?)
+    }
+
+    pub fn touch_api_token(&self, id: i64, ip: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE api_tokens SET last_used_at = ?2, last_used_ip = ?3 WHERE id = ?1",
+            params![id, now(), ip],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke a token; with `owner`, only if it belongs to that user.
+    /// Returns the revoked token.
+    pub fn delete_api_token(&self, id: i64, owner: Option<i64>) -> Result<Option<ApiToken>> {
+        let c = self.conn();
+        let token = c
+            .query_row(
+                &format!(
+                    "SELECT {TOKEN_COLS} FROM api_tokens t JOIN users u ON u.id = t.user_id \
+                     WHERE t.id = ?1 AND (?2 IS NULL OR t.user_id = ?2)"
+                ),
+                params![id, owner],
+                token_from_row,
+            )
+            .optional()?;
+        if token.is_some() {
+            c.execute("DELETE FROM api_tokens WHERE id = ?1", params![id])?;
+        }
+        Ok(token)
     }
 
     // ── auth audit / rate limiting ──
@@ -1276,6 +1430,40 @@ mod tests {
         }
         let third = s.record_login_failure(u.id, 5, 60, 3600).unwrap().unwrap();
         assert!((third - now() - 60).abs() <= 1);
+    }
+
+    #[test]
+    fn api_token_lifecycle() {
+        let s = Store::open_in_memory().unwrap();
+        let alice = s.create_user("alice", "h", "user", "active").unwrap();
+        let bob = s.create_user("bob", "h", "admin", "active").unwrap();
+        let t = s
+            .create_api_token(alice.id, "agent", "hash-a", "hallu_abcd", None)
+            .unwrap();
+        assert_eq!((t.username.as_str(), t.name.as_str()), ("alice", "agent"));
+        s.create_api_token(bob.id, "ci", "hash-b", "hallu_efgh", Some(now() + 60))
+            .unwrap();
+        assert_eq!(s.count_api_tokens(alice.id).unwrap(), 1);
+        assert_eq!(s.list_api_tokens(Some(alice.id)).unwrap().len(), 1);
+        assert_eq!(s.list_api_tokens(None).unwrap().len(), 2);
+
+        let auth = s.get_api_token("hash-a").unwrap().unwrap();
+        assert_eq!(
+            (auth.id, auth.user.id, auth.last_used_at),
+            (t.id, alice.id, None)
+        );
+        s.touch_api_token(t.id, "10.0.0.1").unwrap();
+        let listed = &s.list_api_tokens(Some(alice.id)).unwrap()[0];
+        assert_eq!(listed.last_used_ip.as_deref(), Some("10.0.0.1"));
+        assert!(s.get_api_token("nope").unwrap().is_none());
+
+        // Only the owner (or an unrestricted admin call) can revoke.
+        assert!(s.delete_api_token(t.id, Some(bob.id)).unwrap().is_none());
+        assert!(s.delete_api_token(t.id, Some(alice.id)).unwrap().is_some());
+        assert!(s.get_api_token("hash-a").unwrap().is_none());
+        // Deleting the user removes their tokens.
+        s.delete_user(bob.id).unwrap();
+        assert!(s.list_api_tokens(None).unwrap().is_empty());
     }
 
     #[test]

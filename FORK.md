@@ -22,6 +22,9 @@ stays conflict-free.
 - **Check history**: runs, papers and results are stored in SQLite as they
   arrive. Users can review them, mark false positives, re-check and export in
   every upstream format.
+- **API for agents**: personal API tokens (`Authorization: Bearer`), a
+  long-polling compact report per run, and self-served docs at `/api/docs`
+  (`/llms.txt`), so scripts and agents can check papers without a browser.
 - **Reference-database page**: shows each offline DB's build date, age, size
   and record counts. Admins can update DBs and grow the local corpus with a
   live log. Paths and logs are admin-only.
@@ -30,7 +33,7 @@ stays conflict-free.
 
 | Path | What | Upstream overlap |
 |---|---|---|
-| `hallucinator-rs/crates/hallucinator-webapp/` | Multi-user web interface: accounts with brute-force protection, check history in SQLite, PDF + `.bib` merging, reference-database management page. See its [README](hallucinator-rs/crates/hallucinator-webapp/README.md) and [API.md](hallucinator-rs/crates/hallucinator-webapp/API.md). | none — own Cargo workspace and lock file |
+| `hallucinator-rs/crates/hallucinator-webapp/` | Multi-user web interface: accounts with brute-force protection, API tokens for agents, check history in SQLite, PDF + `.bib` merging, reference-database management page. See its [README](hallucinator-rs/crates/hallucinator-webapp/README.md), [API.md](hallucinator-rs/crates/hallucinator-webapp/API.md) and [API-GUIDE.md](hallucinator-rs/crates/hallucinator-webapp/API-GUIDE.md). | none — own Cargo workspace and lock file |
 | `hallucinator-rs/crates/hallucinator-bbl/src/lib.rs` | `.bib`/`.bbl` references now carry their URLs (`bib_entry_urls`, `extract_urls`), so web citations from bibliographies can use the URL fallback. | small patch — candidate for an upstream PR |
 | `FORK.md` | this file | none |
 

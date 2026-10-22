@@ -1,6 +1,13 @@
 //! Authentication: Argon2id password hashes, opaque session tokens (only a
-//! SHA-256 of the token is stored), per-session CSRF tokens, and
-//! brute-force protection for sign-in.
+//! SHA-256 of the token is stored), per-session CSRF tokens, personal API
+//! tokens for scripts and agents, and brute-force protection for sign-in.
+//!
+//! API tokens (`Authorization: Bearer hallu_…`) act with their owner's
+//! permissions and need no CSRF token: browsers never attach that header on
+//! their own, so a cross-site request cannot carry it. Like sessions, only a
+//! SHA-256 of the token is stored. Tokens cannot sign out, change the
+//! password or manage tokens ([`SessionUser`]), so a leaked token cannot
+//! mint more of itself.
 //!
 //! Brute-force policy (see [`LoginPolicy`]):
 //! * per account: `account_threshold` consecutive failures lock the account
@@ -27,9 +34,12 @@ use sha2::{Digest, Sha256};
 
 use crate::api::ApiError;
 use crate::state::AppState;
-use crate::store::{Session, User};
+use crate::store::{Session, Store, User};
 
 pub const SESSION_COOKIE: &str = "hallu_session";
+
+/// Every API token starts with this, so leaked tokens are easy to spot.
+pub const API_TOKEN_PREFIX: &str = "hallu_";
 
 #[derive(Debug, Clone)]
 pub struct LoginPolicy {
@@ -58,6 +68,43 @@ pub fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub fn new_api_token() -> String {
+    format!("{API_TOKEN_PREFIX}{}", random_token())
+}
+
+/// The start of a token kept in listings so owners can tell tokens apart.
+pub fn token_display_prefix(token: &str) -> String {
+    token.chars().take(API_TOKEN_PREFIX.len() + 4).collect()
+}
+
+pub fn validate_token_name(name: &str) -> Result<(), &'static str> {
+    let n = name.chars().count();
+    if (1..=64).contains(&n) && !name.chars().any(char::is_control) {
+        Ok(())
+    } else {
+        Err("Token name must be 1–64 characters.")
+    }
+}
+
+/// Create an API token for `user_id`. Returns the secret, which is never
+/// stored or shown again, and the stored record.
+pub fn issue_api_token(
+    store: &Store,
+    user_id: i64,
+    name: &str,
+    expires_at: Option<i64>,
+) -> anyhow::Result<(String, crate::store::ApiToken)> {
+    let secret = new_api_token();
+    let token = store.create_api_token(
+        user_id,
+        name,
+        &hash_token(&secret),
+        &token_display_prefix(&secret),
+        expires_at,
+    )?;
+    Ok((secret, token))
 }
 
 pub fn random_id() -> String {
@@ -215,26 +262,101 @@ impl FromRequestParts<Arc<AppState>> for ClientIp {
 
 /// Look up the session for a request without enforcing CSRF.
 pub fn session_from_headers(state: &AppState, headers: &HeaderMap) -> Option<(String, Session)> {
+    lookup_session(&state.store, headers)
+}
+
+fn lookup_session(store: &Store, headers: &HeaderMap) -> Option<(String, Session)> {
     let token = cookie_value(headers, SESSION_COOKIE)?;
     if token.is_empty() {
         return None;
     }
     let token_hash = hash_token(token);
-    let session = state.store.get_session(&token_hash).ok()??;
+    let session = store.get_session(&token_hash).ok()??;
     if session.expires_at < crate::store::now() || session.user.status != "active" {
         return None;
     }
     if crate::store::now() - session.last_seen_at > 60 {
-        let _ = state.store.touch_session(&token_hash);
+        let _ = store.touch_session(&token_hash);
     }
     Some((token_hash, session))
 }
 
-/// An authenticated, active user. Rejects with 401 without a valid session,
-/// and with 403 when a state-changing request lacks the CSRF header.
+/// The token of an `Authorization: Bearer <token>` header, if any.
+pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.trim().split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim())
+        .filter(|t| !t.is_empty())
+}
+
+/// Resolve the request's API token. `Ok(None)`: no bearer header was sent.
+/// A bearer header that does not name a live token of an active account is
+/// rejected outright rather than falling back to the session cookie.
+pub fn lookup_api_token(
+    store: &Store,
+    headers: &HeaderMap,
+    ip: &str,
+) -> Result<Option<(i64, User)>, ApiError> {
+    let Some(token) = bearer_token(headers) else {
+        return Ok(None);
+    };
+    let invalid = || ApiError::unauthorized("Invalid, expired or revoked API token.");
+    let t = crate::store::now();
+    let auth = store
+        .get_api_token(&hash_token(token))?
+        .filter(|a| a.expires_at.is_none_or(|e| e > t) && a.user.status == "active")
+        .ok_or_else(invalid)?;
+    if auth.last_used_at.is_none_or(|l| t - l > 60) {
+        let _ = store.touch_api_token(auth.id, ip);
+    }
+    Ok(Some((auth.id, auth.user)))
+}
+
+/// How a request proved who it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// Browser session cookie; holds the SHA-256 of the session token.
+    Session(String),
+    /// Personal API token, by id.
+    ApiToken(i64),
+}
+
+/// Authenticate a request: an API token if one is sent, else the session
+/// cookie, which must come with the CSRF token on state-changing methods.
+pub fn authenticate(
+    store: &Store,
+    headers: &HeaderMap,
+    method: &Method,
+    ip: &str,
+) -> Result<(User, Credential), ApiError> {
+    if let Some((id, user)) = lookup_api_token(store, headers, ip)? {
+        return Ok((user, Credential::ApiToken(id)));
+    }
+    let (token_hash, session) =
+        lookup_session(store, headers).ok_or_else(|| ApiError::unauthorized("Please sign in."))?;
+    let safe = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if !safe {
+        let sent = headers
+            .get("x-csrf-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !constant_time_eq(sent.as_bytes(), session.csrf_token.as_bytes()) {
+            return Err(ApiError::forbidden(
+                "Missing or invalid CSRF token. Reload the page and try again.",
+            ));
+        }
+    }
+    Ok((session.user, Credential::Session(token_hash)))
+}
+
+/// An authenticated, active user, by session cookie or API token. Rejects
+/// with 401 without valid credentials, and with 403 when a cookie-session
+/// request that changes state lacks the CSRF header.
 pub struct AuthUser {
     pub user: User,
-    pub token_hash: String,
+    pub credential: Credential,
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthUser {
@@ -244,25 +366,38 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let (token_hash, session) = session_from_headers(state, &parts.headers)
-            .ok_or_else(|| ApiError::unauthorized("Please sign in."))?;
-        let safe = matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS);
-        if !safe {
-            let sent = parts
-                .headers
-                .get("x-csrf-token")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            if !constant_time_eq(sent.as_bytes(), session.csrf_token.as_bytes()) {
-                return Err(ApiError::forbidden(
-                    "Missing or invalid CSRF token. Reload the page and try again.",
-                ));
-            }
+        let ClientIp(ip) = ClientIp::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|never| match never {});
+        let (user, credential) = authenticate(&state.store, &parts.headers, &parts.method, &ip)?;
+        Ok(AuthUser { user, credential })
+    }
+}
+
+/// A user signed in with a browser session. Used where an API token must
+/// not do: signing out, changing the password, managing API tokens.
+pub struct SessionUser {
+    pub user: User,
+    pub token_hash: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for SessionUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        match user.credential {
+            Credential::Session(token_hash) => Ok(SessionUser {
+                user: user.user,
+                token_hash,
+            }),
+            Credential::ApiToken(_) => Err(ApiError::forbidden(
+                "API tokens cannot be used here. Sign in to the web interface instead.",
+            )),
         }
-        Ok(AuthUser {
-            user: session.user,
-            token_hash,
-        })
     }
 }
 
@@ -353,6 +488,100 @@ mod tests {
         assert!(origin_allowed(&h));
         h.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
         assert!(!origin_allowed(&h));
+    }
+
+    fn store_with_user(status: &str) -> (Store, User) {
+        let store = Store::open_in_memory().unwrap();
+        let user = store.create_user("agent", "h", "user", status).unwrap();
+        (store, user)
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn bearer_header_parsing() {
+        assert_eq!(bearer_token(&bearer("hallu_x")), Some("hallu_x"));
+        let mut h = HeaderMap::new();
+        h.insert(header::AUTHORIZATION, "bearer  tok ".parse().unwrap());
+        assert_eq!(bearer_token(&h), Some("tok"));
+        h.insert(header::AUTHORIZATION, "Basic dXNlcjpwYXNz".parse().unwrap());
+        assert_eq!(bearer_token(&h), None);
+        h.insert(header::AUTHORIZATION, "Bearer ".parse().unwrap());
+        assert_eq!(bearer_token(&h), None);
+        assert_eq!(bearer_token(&HeaderMap::new()), None);
+        let t = new_api_token();
+        assert!(t.starts_with(API_TOKEN_PREFIX) && t.len() > 40);
+        assert_eq!(token_display_prefix(&t).len(), API_TOKEN_PREFIX.len() + 4);
+    }
+
+    #[test]
+    fn api_token_authenticates_without_csrf() {
+        let (store, user) = store_with_user("active");
+        let token = new_api_token();
+        let t = store
+            .create_api_token(user.id, "agent", &hash_token(&token), "hallu_", None)
+            .unwrap();
+        let (u, cred) = authenticate(&store, &bearer(&token), &Method::POST, "1.2.3.4").unwrap();
+        assert_eq!((u.id, cred), (user.id, Credential::ApiToken(t.id)));
+        let listed = &store.list_api_tokens(Some(user.id)).unwrap()[0];
+        assert_eq!(listed.last_used_ip.as_deref(), Some("1.2.3.4"));
+
+        // A wrong token is a 401 even when a session cookie is also sent.
+        let mut h = bearer("hallu_wrong");
+        h.insert(header::COOKIE, "hallu_session=whatever".parse().unwrap());
+        let e = authenticate(&store, &h, &Method::GET, "ip").unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::UNAUTHORIZED);
+
+        // Revoked.
+        store.delete_api_token(t.id, None).unwrap();
+        assert!(authenticate(&store, &bearer(&token), &Method::GET, "ip").is_err());
+    }
+
+    #[test]
+    fn api_token_rejected_when_expired_or_account_disabled() {
+        let (store, user) = store_with_user("active");
+        let token = new_api_token();
+        store
+            .create_api_token(user.id, "old", &hash_token(&token), "hallu_", Some(1))
+            .unwrap();
+        assert!(authenticate(&store, &bearer(&token), &Method::GET, "ip").is_err());
+
+        let fresh = new_api_token();
+        store
+            .create_api_token(user.id, "new", &hash_token(&fresh), "hallu_", None)
+            .unwrap();
+        assert!(authenticate(&store, &bearer(&fresh), &Method::GET, "ip").is_ok());
+        store.set_user_status(user.id, "disabled").unwrap();
+        assert!(authenticate(&store, &bearer(&fresh), &Method::GET, "ip").is_err());
+    }
+
+    #[test]
+    fn session_needs_csrf_on_writes() {
+        let (store, user) = store_with_user("active");
+        let token = random_token();
+        store
+            .create_session(&hash_token(&token), user.id, "csrf-1", 3600, "ip", None)
+            .unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={token}").parse().unwrap(),
+        );
+        let (_, cred) = authenticate(&store, &h, &Method::GET, "ip").unwrap();
+        assert_eq!(cred, Credential::Session(hash_token(&token)));
+        let e = authenticate(&store, &h, &Method::POST, "ip").unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::FORBIDDEN);
+        h.insert("x-csrf-token", "csrf-1".parse().unwrap());
+        assert!(authenticate(&store, &h, &Method::POST, "ip").is_ok());
+        let e = authenticate(&store, &HeaderMap::new(), &Method::GET, "ip").unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[test]

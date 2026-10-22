@@ -15,7 +15,7 @@ use super::{ApiError, ApiResult, EventStream, broadcast_events, sse_event, sse_r
 use crate::auth::AuthUser;
 use crate::inputs::{self, InputFile, InputKind};
 use crate::refdb::RunOptions;
-use crate::runs::{RetryError, RetryScope, run_summary};
+use crate::runs::{ReportRefs, RetryError, RetryScope, report_view, run_summary};
 use crate::state::AppState;
 use crate::store::{RunRow, User};
 
@@ -39,6 +39,9 @@ const BACKENDS: &[&str] = &[
 ];
 
 const MAX_FILES: usize = 500;
+
+/// Longest a `?wait=<secs>` request may block.
+const MAX_WAIT_SECS: u64 = 600;
 
 pub async fn options(State(state): State<Arc<AppState>>, _user: AuthUser) -> Json<Value> {
     let r = &state.refdb;
@@ -298,7 +301,19 @@ pub async fn create(
         .create_run(&run_id, user.id, &title, &options_json, &papers)?;
     tracing::info!(run = %run_id, user = %user.username, papers = papers.len(), "run created");
     state.runs.start(run_id.clone(), planned, opts, uploads);
-    Ok((StatusCode::CREATED, Json(json!({ "run_id": run_id }))).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "run_id": run_id,
+            "links": {
+                "report": format!("/api/runs/{run_id}/report"),
+                "detail": format!("/api/runs/{run_id}"),
+                "events": format!("/api/runs/{run_id}/events"),
+                "web": format!("/#/runs/{run_id}"),
+            },
+        })),
+    )
+        .into_response())
 }
 
 /// Validate uploaded files and expand archives into their PDFs/bibs.
@@ -359,17 +374,55 @@ async fn expand_inputs(saved: Vec<Saved>, dir: &Path) -> ApiResult<Vec<InputFile
     Ok(out)
 }
 
+#[derive(Deserialize)]
+pub struct DetailQuery {
+    /// Block up to this many seconds for the run to finish first.
+    wait: Option<u64>,
+}
+
+async fn wait_for_run(state: &AppState, id: &str, wait: Option<u64>) {
+    let secs = wait.unwrap_or(0).min(MAX_WAIT_SECS);
+    if secs > 0 {
+        let timeout = std::time::Duration::from_secs(secs);
+        state.runs.wait_idle(id, timeout, &state.shutdown).await;
+    }
+}
+
 pub async fn detail(
     State(state): State<Arc<AppState>>,
     AuthUser { user, .. }: AuthUser,
     UrlPath(id): UrlPath<String>,
+    Query(q): Query<DetailQuery>,
 ) -> ApiResult<Json<Value>> {
     load_run(&state, &user, &id)?;
+    wait_for_run(&state, &id, q.wait).await;
     let d = state
         .runs
         .detail(&id)?
         .ok_or_else(|| ApiError::not_found("Run not found."))?;
     Ok(Json(d))
+}
+
+#[derive(Deserialize)]
+pub struct ReportQuery {
+    wait: Option<u64>,
+    #[serde(default)]
+    refs: ReportRefs,
+}
+
+/// Compact result for scripts and agents; see `report_view`.
+pub async fn report(
+    State(state): State<Arc<AppState>>,
+    AuthUser { user, .. }: AuthUser,
+    UrlPath(id): UrlPath<String>,
+    Query(q): Query<ReportQuery>,
+) -> ApiResult<Json<Value>> {
+    load_run(&state, &user, &id)?;
+    wait_for_run(&state, &id, q.wait).await;
+    // Re-read: the run may have finished (or been deleted) while waiting.
+    let run = load_run(&state, &user, &id)?;
+    let papers = state.store.load_papers(&id)?;
+    Ok(Json(report_view(&run, &papers, q.refs)))
 }
 
 pub async fn events(

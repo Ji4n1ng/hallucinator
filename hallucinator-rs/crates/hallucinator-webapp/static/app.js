@@ -1392,7 +1392,7 @@
       const verdictT = h("div", { class: "verdict-toggle", role: "group", "aria-label": "Paper verdict" },
         verdictBtn(p, "safe", "Safe"), verdictBtn(p, "questionable", "Questionable"));
       const retry = dropdown("Re-check", (close) => [
-        menuBtn("Re-check failed databases", "Only databases that timed out or errored", () => { close(); retryPaper("failed"); }),
+        menuBtn("Re-check failed databases", "Not-found references: only the databases that timed out or errored", () => { close(); retryPaper("failed"); }),
         menuBtn("Re-check not found", "Full re-check of every not-found reference", () => { close(); retryPaper("not_found"); }),
         menuBtn("Re-check all problems", "Not found, mismatches and retracted", () => { close(); retryPaper("problems"); }),
       ], { disabled: runActive() || p.status === "failed" });
@@ -2276,12 +2276,76 @@
   // 5e. View: Admin
   // ════════════════════════════════════════════════════════════════════
 
+  // ── API tokens (Account and Admin pages) ──
+
+  function tokenExpiry(t) {
+    if (!t.expires_at) return h("span", { class: "stone" }, "Never");
+    if (t.expires_at <= nowSec()) return badge("Expired", "badge-error badge-sm", absTime(t.expires_at));
+    return timeEl(t.expires_at);
+  }
+
+  function tokenTable(tokens, { showUser, onRevoke }) {
+    return h("div", { class: "table-wrap" }, h("table", { class: "data compact" },
+      h("thead", null, h("tr", null,
+        showUser ? h("th", null, "User") : null,
+        h("th", null, "Name"), h("th", null, "Token"), h("th", null, "Created"),
+        h("th", null, "Last used"), h("th", null, "Expires"), h("th", null, ""))),
+      h("tbody", null, tokens.map((t) => h("tr", null,
+        showUser ? h("td", null, t.username) : null,
+        h("td", { class: "break" }, h("span", { class: "t-title" }, t.name)),
+        h("td", null, h("code", null, t.prefix + "…")),
+        h("td", { class: "nowrap" }, timeEl(t.created_at)),
+        h("td", { class: "nowrap" }, timeEl(t.last_used_at), t.last_used_ip ? h("div", { class: "stone small" }, t.last_used_ip) : null),
+        h("td", { class: "nowrap" }, tokenExpiry(t)),
+        h("td", null, h("button", { type: "button", class: "btn btn-tertiary btn-xs", onclick: () => onRevoke(t) }, "Revoke")))))));
+  }
+
+  async function revokeToken(t, done) {
+    const ok = await confirmDialog({
+      title: `Revoke “${t.name}”?`,
+      message: "Scripts and agents using this token will get 401 errors from now on. This cannot be undone.",
+      confirmLabel: "Revoke token", danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api("DELETE", `/api/tokens/${t.id}`);
+      toast(`Token “${t.name}” revoked.`, "success");
+      done();
+    } catch (e) { showError(e); }
+  }
+
+  function showNewToken(secret, name) {
+    const field = h("input", { class: "input mono", readonly: true, value: secret, "aria-label": "New API token", spellcheck: "false", style: { flex: "1", minWidth: "0" } });
+    const copy = async () => {
+      field.select();
+      let copied = false;
+      try {
+        if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(secret); copied = true; }
+        else copied = document.execCommand("copy");
+      } catch (_) { copied = false; }
+      toast(copied ? "Token copied." : "Select the token and copy it by hand.", copied ? "success" : "error");
+    };
+    const done = h("button", { type: "button", class: "btn btn-primary", onclick: () => m.close() }, "Done");
+    const m = openModal({
+      title: `Token “${name}” created`,
+      body: h("div", { class: "stack" },
+        h("div", { class: "banner banner-warn" }, "Copy it now: it is shown only once and cannot be recovered."),
+        h("div", { class: "row", style: { flexWrap: "nowrap" } }, field,
+          h("button", { type: "button", class: "btn btn-secondary btn-sm", onclick: copy }, "Copy")),
+        h("p", { class: "muted small" }, "Send it as ", h("code", null, "Authorization: Bearer <token>"), ". See the ",
+          h("a", { href: "/api/docs", target: "_blank", rel: "noopener" }, "API guide"), ".")),
+      actions: [done],
+    });
+    setTimeout(() => field.select(), 0);
+  }
+
   function viewAdmin(root, ctx) {
     if (S.user.role !== "admin") {
       root.appendChild(h("div", { class: "container page" }, emptyState("Administrators only", "You need an administrator account to manage users.", h("a", { class: "btn btn-primary", href: "#/" }, "New check"))));
       return;
     }
     const usersEl = h("div", null, skeleton(3));
+    const tokensEl = h("div", null, skeleton(2));
     const eventsEl = h("div", null, skeleton(3));
     const blockedEl = h("div");
 
@@ -2321,6 +2385,10 @@
         h("div", null, h("h1", { class: "heading-lg" }, "Admin"), h("p", { class: "muted" }, "Accounts and sign-in security. Only administrators can create accounts."))),
       h("section", null, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Users"), h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: () => loadUsers() }, "Refresh")), usersEl),
       h("section", { class: "section" }, createForm),
+      h("section", { class: "section" },
+        h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "API tokens"), h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: () => loadTokens() }, "Refresh")),
+        h("p", { class: "muted small", style: { marginBottom: "12px" } }, "Every account's tokens for scripts and agents. Users create their own on the Account page; ", h("code", null, "hallucinator-webapp create-token"), " creates one from the shell."),
+        tokensEl),
       h("section", { class: "section" },
         h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Sign-in activity"), h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: () => loadEvents() }, "Refresh")),
         blockedEl, eventsEl)));
@@ -2378,6 +2446,19 @@
       }
     }
 
+    async function loadTokens() {
+      try {
+        const data = await api("GET", "/api/admin/tokens");
+        if (!ctx.alive()) return;
+        const tokens = (data && data.tokens) || [];
+        replace(tokensEl, tokens.length
+          ? tokenTable(tokens, { showUser: true, onRevoke: (t) => revokeToken(t, () => { loadTokens(); loadEvents(); }) })
+          : emptyState("No API tokens", "Tokens let scripts and agents use the API without a password."));
+      } catch (e) {
+        if (ctx.alive()) replace(tokensEl, h("p", { class: "field-error" }, e.message));
+      }
+    }
+
     const KIND_BADGE = {
       login_ok: ["Sign-in", "badge-success"],
       login_fail: ["Failed sign-in", "badge-error"],
@@ -2386,6 +2467,8 @@
       ip_block: ["IP blocked", "badge-error"],
       signup: ["Sign-up", "badge-beta"],
       logout: ["Sign-out", "badge-muted"],
+      token_create: ["Token created", "badge-beta"],
+      token_revoke: ["Token revoked", "badge-muted"],
     };
 
     async function loadEvents() {
@@ -2422,6 +2505,7 @@
     }
 
     loadUsers();
+    loadTokens();
     loadEvents();
   }
 
@@ -2482,9 +2566,59 @@
       h("label", { class: "field" }, h("span", null, "Confirm new password"), nw2),
       err, h("div", null, btn));
 
+    const tokensEl = h("div", null, skeleton(2));
+    const tName = h("input", { class: "input", maxlength: "64", autocomplete: "off", placeholder: "e.g. claude agent" });
+    const tExp = h("select", { class: "input" },
+      h("option", { value: "" }, "Never"), h("option", { value: "30" }, "In 30 days"),
+      h("option", { value: "90" }, "In 90 days"), h("option", { value: "365" }, "In 1 year"));
+    const tErr = h("p", { class: "field-error hidden", role: "alert" });
+    const tBtn = h("button", { type: "submit", class: "btn btn-secondary btn-sm" }, "Create token");
+    const tokenForm = h("form", {
+      class: "card stack", novalidate: true,
+      onsubmit: async (e) => {
+        e.preventDefault();
+        tErr.classList.add("hidden");
+        const name = tName.value.trim();
+        if (!name || name.length > 64) { tErr.textContent = "Give the token a name (up to 64 characters)."; tErr.classList.remove("hidden"); return; }
+        tBtn.disabled = true;
+        try {
+          const res = await api("POST", "/api/tokens", { name, expires_in_days: tExp.value ? Number(tExp.value) : null });
+          tokenForm.reset();
+          showNewToken(res.secret, res.token.name);
+          loadTokens();
+        } catch (ex) {
+          tErr.textContent = ex.message;
+          tErr.classList.remove("hidden");
+        } finally { tBtn.disabled = false; }
+      },
+    },
+      h("div", { class: "row-between" }, h("h2", { class: "card-title" }, "API tokens"),
+        h("a", { class: "small", href: "/api/docs", target: "_blank", rel: "noopener" }, "API guide")),
+      h("p", { class: "muted small" }, "Scripts and agents use a token instead of your password: send it as ",
+        h("code", null, "Authorization: Bearer <token>"), ". A token acts with your permissions, but cannot change your password or create tokens."),
+      tokensEl,
+      h("div", { class: "form-grid" },
+        h("label", { class: "field" }, h("span", null, "Name"), tName),
+        h("label", { class: "field" }, h("span", null, "Expires"), tExp)),
+      tErr, h("div", null, tBtn));
+
+    async function loadTokens() {
+      try {
+        const data = await api("GET", "/api/tokens");
+        if (!ctx.alive()) return;
+        const tokens = (data && data.tokens) || [];
+        replace(tokensEl, tokens.length
+          ? tokenTable(tokens, { showUser: false, onRevoke: (t) => revokeToken(t, loadTokens) })
+          : h("p", { class: "stone small" }, "No tokens yet."));
+      } catch (e) {
+        if (ctx.alive()) replace(tokensEl, h("p", { class: "field-error" }, e.message));
+      }
+    }
+    loadTokens();
+
     root.appendChild(h("div", { class: "container page", style: { maxWidth: "720px" } },
-      h("div", { class: "page-head" }, h("div", null, h("h1", { class: "heading-lg" }, "Account"), h("p", { class: "muted" }, "Your profile and password."))),
-      h("div", { class: "stack-lg" }, profileEl, form)));
+      h("div", { class: "page-head" }, h("div", null, h("h1", { class: "heading-lg" }, "Account"), h("p", { class: "muted" }, "Your profile, password and API tokens."))),
+      h("div", { class: "stack-lg" }, profileEl, form, tokenForm)));
   }
 
   // ════════════════════════════════════════════════════════════════════

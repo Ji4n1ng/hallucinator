@@ -195,6 +195,250 @@ pub fn run_summary(r: &RunRow, stats: &Stats) -> Value {
     })
 }
 
+// ── Compact report for scripts and agents (`GET /api/runs/:id/report`) ──
+
+/// Which references a report lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportRefs {
+    /// Not found, mismatched, inconclusive or retracted, and not marked safe.
+    #[default]
+    Problems,
+    All,
+    None,
+}
+
+/// A reference worth a human look: the `problems` counter plus inconclusive
+/// ones (not found while a database failed), unless marked safe.
+fn needs_attention(r: &RefRow) -> bool {
+    r.skip_reason.is_none()
+        && r.fp_reason.is_none()
+        && (r.retracted
+            || matches!(
+                r.verdict.as_deref(),
+                Some("not_found" | "mismatch" | "inconclusive")
+            ))
+}
+
+fn fp_label(reason: &str) -> &'static str {
+    match reason {
+        "broken_parse" => "broken citation parse",
+        "exists_elsewhere" => "found on Google Scholar / another source",
+        "all_timed_out" => "all databases timed out",
+        "known_good" => "verified as real by a reviewer",
+        "non_academic" => "non-academic source",
+        _ => "marked safe",
+    }
+}
+
+/// One plain sentence on why a reference got its verdict.
+fn ref_reason(r: &RefRow, res: Option<&StoredResult>) -> String {
+    if let Some(skip) = &r.skip_reason {
+        return match skip.as_str() {
+            "url_only" => "Not checked: the citation is only a URL.",
+            "short_title" => "Not checked: the title is too short to match reliably.",
+            "no_title" => "Not checked: no title could be extracted from the citation.",
+            "no_authors" => "Not checked: no authors could be extracted from the citation.",
+            _ => "Not checked.",
+        }
+        .to_string();
+    }
+    let Some(res) = res else {
+        return "Not checked yet.".to_string();
+    };
+    let source = res.source.as_deref().unwrap_or("a database");
+    let mut out = match r.verdict.as_deref() {
+        Some("verified") => format!("Verified in {source}."),
+        Some("mismatch") => {
+            let mut what = Vec::new();
+            if res.mismatch.iter().any(|m| m == "author") {
+                let found: Vec<&str> = res
+                    .found_authors
+                    .iter()
+                    .take(6)
+                    .map(String::as_str)
+                    .collect();
+                what.push(if found.is_empty() {
+                    "the authors differ".to_string()
+                } else {
+                    format!("the authors differ (found: {})", found.join(", "))
+                });
+            }
+            if res.mismatch.iter().any(|m| m == "doi") {
+                what.push(
+                    "the cited DOI points to a different paper or does not resolve".to_string(),
+                );
+            }
+            if res.mismatch.iter().any(|m| m == "arxiv_id") {
+                what.push(
+                    "the cited arXiv id points to a different paper or does not exist".to_string(),
+                );
+            }
+            if what.is_empty() {
+                what.push("details differ".to_string());
+            }
+            format!("Title found in {source}, but {}.", what.join("; "))
+        }
+        Some("inconclusive") => format!(
+            "Not found, but {} could not be searched ({}); re-check before concluding.",
+            if res.failed_dbs.len() == 1 {
+                "one database"
+            } else {
+                "some databases"
+            },
+            res.failed_dbs.join(", ")
+        ),
+        Some("skipped") => "Not found in the databases; it cites a web page, which is only \
+                            checked with the url_match option."
+            .to_string(),
+        _ => "Not found in any database: possibly fabricated, or a source the databases do \
+              not index."
+            .to_string(),
+    };
+    if r.retracted {
+        out.push_str(" The paper has been retracted");
+        if let Some(d) = res
+            .retraction_info
+            .as_ref()
+            .and_then(|ri| ri.retraction_doi.as_deref())
+        {
+            out.push_str(&format!(" (notice: {d})"));
+        }
+        out.push('.');
+    }
+    if let Some(fp) = &r.fp_reason {
+        out.push_str(&format!(" Marked safe: {}.", fp_label(fp)));
+    }
+    out
+}
+
+/// Drop `null`s, empty strings/arrays and `false`s from a JSON object.
+fn pruned(v: Value) -> Value {
+    match v {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| match v {
+                    Value::Null | Value::Bool(false) => false,
+                    Value::String(s) => !s.is_empty(),
+                    Value::Array(a) => !a.is_empty(),
+                    _ => true,
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn report_ref(r: &RefRow) -> Value {
+    let res: Option<StoredResult> = r
+        .result_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let verdict = if r.skip_reason.is_some() {
+        "skipped"
+    } else {
+        r.verdict.as_deref().unwrap_or("pending")
+    };
+    let res_ref = res.as_ref();
+    pruned(json!({
+        "idx": r.idx,
+        "number": r.original_number,
+        "verdict": verdict,
+        "needs_attention": needs_attention(r),
+        "reason": ref_reason(r, res_ref),
+        "title": r.title,
+        "authors": r.authors,
+        "raw_citation": r.raw_citation,
+        "doi": r.doi,
+        "arxiv_id": r.arxiv_id,
+        "urls": r.urls,
+        "mismatch": res_ref.map(|x| x.mismatch.clone()),
+        "source": res_ref.and_then(|x| x.source.clone()),
+        "found_authors": res_ref.map(|x| x.found_authors.clone()),
+        "paper_url": res_ref.and_then(|x| x.paper_url.clone()),
+        "failed_dbs": res_ref.map(|x| x.failed_dbs.clone()),
+        "retracted": r.retracted,
+        "fp_reason": r.fp_reason,
+    }))
+}
+
+/// Compact, agent-oriented view of a run: status, counters and one line of
+/// reasoning per listed reference. The full data stays in `RunDetail`.
+pub fn report_view(run: &RunRow, papers: &[(PaperRow, Vec<RefRow>)], which: ReportRefs) -> Value {
+    let mut total = Stats::default();
+    let mut attention = 0;
+    let papers: Vec<Value> = papers
+        .iter()
+        .map(|(p, refs)| {
+            let stats = paper_stats(refs);
+            total.merge(&stats);
+            attention += refs.iter().filter(|r| needs_attention(r)).count();
+            let listed: Vec<Value> = refs
+                .iter()
+                .filter(|r| match which {
+                    ReportRefs::All => true,
+                    ReportRefs::Problems => needs_attention(r),
+                    ReportRefs::None => false,
+                })
+                .map(report_ref)
+                .collect();
+            json!({
+                "idx": p.idx,
+                "filename": p.filename,
+                "input_kind": p.input_kind,
+                "companion_filename": p.companion_filename,
+                "status": p.status,
+                "error": p.error,
+                "stats": stats,
+                "refs": listed,
+            })
+        })
+        .collect();
+    let done = !matches!(run.status.as_str(), "queued" | "running");
+    let summary = if done {
+        format!(
+            "Run {}: {} references, {} verified, {} not found, {} mismatched, {} inconclusive, \
+             {} retracted, {} skipped. Needing attention: {}.",
+            run.status,
+            total.total,
+            total.verified,
+            total.not_found,
+            total.mismatch,
+            total.inconclusive,
+            total.retracted,
+            total.skipped,
+            attention,
+        )
+    } else if run.status == "queued" {
+        "Run queued: waiting for a free slot.".to_string()
+    } else if total.total == 0 {
+        "Run running: extracting references.".to_string()
+    } else {
+        format!(
+            "Run running: {} of {} checkable references checked so far.",
+            total.checked,
+            total.checked + total.pending,
+        )
+    };
+    json!({
+        "run": {
+            "id": run.id,
+            "title": run.title,
+            "status": run.status,
+            "done": done,
+            "created_at": run.created_at,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "error": run.error,
+            "stats": total,
+            "needs_attention": attention,
+            "summary": summary,
+            "web_path": format!("/#/runs/{}", run.id),
+        },
+        "papers": papers,
+    })
+}
+
 fn run_header(r: &RunRow) -> Value {
     json!({
         "status": r.status,
@@ -268,6 +512,39 @@ impl RunManager {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Wait until the run is no longer live (queued, running or being
+    /// re-checked) or `timeout` passes. Returns `false` on timeout.
+    pub async fn wait_idle(
+        &self,
+        id: &str,
+        timeout: std::time::Duration,
+        shutdown: &CancellationToken,
+    ) -> bool {
+        let Some(mut rx) = self.subscribe(id) else {
+            return true;
+        };
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        // Belt and braces for an `end` sent just before we subscribed.
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = &mut deadline => return false,
+                _ = shutdown.cancelled() => return false,
+                _ = tick.tick() => {
+                    if self.live(id).is_none() {
+                        return true;
+                    }
+                }
+                msg = rx.recv() => match msg {
+                    Ok(m) if m.event == "end" => return true,
+                    Err(broadcast::error::RecvError::Closed) => return true,
+                    _ => {}
+                },
+            }
         }
     }
 
@@ -632,42 +909,12 @@ impl RunManager {
             .store
             .load_paper_refs(run_id, paper_idx)
             .map_err(RetryError::Other)?;
-        let mut targets: Vec<(usize, Reference, Vec<String>)> = Vec::new();
-        for r in &refs {
-            if r.skip_reason.is_some() {
-                continue;
-            }
-            let stored: Option<StoredResult> = r
-                .result_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok());
-            let verdict = r.verdict.as_deref();
-            let failed = stored
-                .as_ref()
-                .map(|s| s.failed_dbs.clone())
-                .unwrap_or_default();
-            let pick = match scope {
-                RetryScope::Ref => Some(r.idx) == ref_idx,
-                RetryScope::Failed => !failed.is_empty(),
-                RetryScope::NotFound => {
-                    matches!(verdict, Some("not_found" | "inconclusive")) || verdict.is_none()
-                }
-                RetryScope::Problems => {
-                    matches!(verdict, Some("not_found" | "inconclusive" | "mismatch"))
-                        || r.retracted
-                        || verdict.is_none()
-                }
-            };
-            if !pick {
-                continue;
-            }
-            let only = if scope == RetryScope::Failed {
-                failed
-            } else {
-                vec![]
-            };
-            targets.push((r.idx, reference_from_row(r), only));
-        }
+        let targets: Vec<(usize, Reference, Vec<String>)> = refs
+            .iter()
+            .filter_map(|r| {
+                retry_target(scope, ref_idx, r).map(|only| (r.idx, reference_from_row(r), only))
+            })
+            .collect();
         if scope == RetryScope::Ref && targets.is_empty() {
             return Err(RetryError::NotFound);
         }
@@ -784,6 +1031,42 @@ impl RunManager {
 
 /// A failed-DB-only retry answers just for the retried databases. Keep the
 /// original per-database rows for the others so the detail view stays whole.
+/// Whether `scope` re-checks `r`, and against which databases (empty: all).
+fn retry_target(scope: RetryScope, ref_idx: Option<usize>, r: &RefRow) -> Option<Vec<String>> {
+    if r.skip_reason.is_some() {
+        return None;
+    }
+    let stored: Option<StoredResult> = r
+        .result_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let verdict = r.verdict.as_deref();
+    let pick = match scope {
+        RetryScope::Ref => Some(r.idx) == ref_idx,
+        // Like the TUI: only unfound refs. Re-querying just the failed
+        // databases of a verified or mismatched ref would replace its
+        // finding with "not found" whenever those databases fail again.
+        RetryScope::Failed => stored
+            .as_ref()
+            .is_some_and(|s| s.status == "not_found" && !s.failed_dbs.is_empty()),
+        RetryScope::NotFound => {
+            matches!(verdict, Some("not_found" | "inconclusive")) || verdict.is_none()
+        }
+        RetryScope::Problems => {
+            matches!(verdict, Some("not_found" | "inconclusive" | "mismatch"))
+                || r.retracted
+                || verdict.is_none()
+        }
+    };
+    if !pick {
+        return None;
+    }
+    Some(match (scope, stored) {
+        (RetryScope::Failed, Some(s)) => s.failed_dbs,
+        _ => vec![],
+    })
+}
+
 fn merge_partial_retry(
     store: &Store,
     run_id: &str,
@@ -914,5 +1197,155 @@ fn extract_planned(paper: &PlannedPaper) -> Result<Extracted, String> {
             })
         }
         (Err(e1), Err(e2)) => Err(format!("Could not extract references: {e1}; {e2}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_ref(n: usize, title: Option<&str>, skip: Option<&str>) -> NewRef {
+        NewRef {
+            original_number: n,
+            title: title.map(String::from),
+            raw_citation: format!("[{n}] raw citation"),
+            authors: vec!["A. Author".into()],
+            doi: None,
+            arxiv_id: None,
+            urls: vec![],
+            skip_reason: skip.map(String::from),
+            origin: "pdf".into(),
+        }
+    }
+
+    fn result(status: &str, mismatch: &[&str], failed: &[&str]) -> StoredResult {
+        StoredResult {
+            title: "t".into(),
+            raw_citation: "raw".into(),
+            ref_authors: vec![],
+            status: status.into(),
+            mismatch: mismatch.iter().map(|s| s.to_string()).collect(),
+            source: (status != "not_found").then(|| "DBLP".to_string()),
+            found_authors: vec!["B. Other".into()],
+            paper_url: None,
+            failed_dbs: failed.iter().map(|s| s.to_string()).collect(),
+            db_results: vec![],
+            doi_info: None,
+            arxiv_info: None,
+            retraction_info: None,
+            url_check_skipped: false,
+        }
+    }
+
+    fn store_result(s: &Store, idx: usize, r: &StoredResult) {
+        let json = serde_json::to_string(r).unwrap();
+        let u = ResultUpdate {
+            result_json: &json,
+            verdict: r.verdict(),
+            mismatch_flags: r.mismatch_kind().bits(),
+            retracted: r.is_retracted(),
+        };
+        s.set_ref_result("r1", 0, idx, &u).unwrap();
+    }
+
+    #[test]
+    fn retrying_failed_databases_leaves_findings_alone() {
+        let s = Store::open_in_memory().unwrap();
+        let u = s.create_user("agent", "h", "user", "active").unwrap();
+        let paper = ("paper.pdf".to_string(), "pdf".to_string(), None, None);
+        s.create_run("r1", u.id, "paper.pdf", "{}", &[paper])
+            .unwrap();
+        let refs: Vec<NewRef> = (1..=4)
+            .map(|n| new_ref(n, Some("A long enough title"), None))
+            .collect();
+        s.set_paper_extraction("r1", 0, "pdf", "{}", None, &refs)
+            .unwrap();
+        let s2 = ["Semantic Scholar"];
+        store_result(&s, 0, &result("not_found", &[], &s2));
+        store_result(&s, 1, &result("mismatch", &["author"], &s2));
+        store_result(&s, 2, &result("verified", &[], &s2));
+        store_result(&s, 3, &result("not_found", &[], &[]));
+        let rows = s.load_paper_refs("r1", 0).unwrap();
+        let pick = |scope| -> Vec<usize> {
+            rows.iter()
+                .filter(|r| retry_target(scope, Some(1), r).is_some())
+                .map(|r| r.idx)
+                .collect()
+        };
+        assert_eq!(pick(RetryScope::Failed), vec![0]);
+        assert_eq!(
+            retry_target(RetryScope::Failed, None, &rows[0]),
+            Some(vec!["Semantic Scholar".to_string()])
+        );
+        assert_eq!(pick(RetryScope::NotFound), vec![0, 3]);
+        assert_eq!(pick(RetryScope::Problems), vec![0, 1, 3]);
+        assert_eq!(pick(RetryScope::Ref), vec![1]);
+        assert_eq!(
+            retry_target(RetryScope::Ref, Some(1), &rows[1]),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn report_lists_what_needs_attention() {
+        let s = Store::open_in_memory().unwrap();
+        let u = s.create_user("agent", "h", "user", "active").unwrap();
+        let paper = ("paper.pdf".to_string(), "pdf".to_string(), None, None);
+        s.create_run("r1", u.id, "paper.pdf", "{}", &[paper])
+            .unwrap();
+        let refs = vec![
+            new_ref(1, Some("A verified paper title"), None),
+            new_ref(2, Some("A fabricated paper title"), None),
+            new_ref(3, Some("A paper with other authors"), None),
+            new_ref(4, Some("A paper behind a timeout"), None),
+            new_ref(5, Some("Reviewed and fine"), None),
+            new_ref(6, None, Some("no_title")),
+            new_ref(7, Some("Still being checked"), None),
+        ];
+        s.set_paper_extraction("r1", 0, "pdf", "{}", None, &refs)
+            .unwrap();
+        store_result(&s, 0, &result("verified", &[], &[]));
+        store_result(&s, 1, &result("not_found", &[], &[]));
+        store_result(&s, 2, &result("mismatch", &["author"], &[]));
+        store_result(&s, 3, &result("not_found", &[], &["Semantic Scholar"]));
+        store_result(&s, 4, &result("not_found", &[], &[]));
+        s.set_ref_fp("r1", 0, 4, Some("known_good")).unwrap();
+        s.set_run_finished("r1", "done", None).unwrap();
+
+        let run = s.get_run("r1").unwrap().unwrap();
+        let papers = s.load_papers("r1").unwrap();
+        let rep = report_view(&run, &papers, ReportRefs::Problems);
+        assert_eq!(rep["run"]["done"], json!(true));
+        assert_eq!(rep["run"]["needs_attention"], json!(3));
+        let listed = rep["papers"][0]["refs"].as_array().unwrap();
+        let numbers: Vec<u64> = listed
+            .iter()
+            .map(|r| r["number"].as_u64().unwrap())
+            .collect();
+        assert_eq!(numbers, vec![2, 3, 4]);
+        assert_eq!(listed[0]["verdict"], json!("not_found"));
+        assert!(
+            listed[1]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("found: B. Other")
+        );
+        assert!(
+            listed[2]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Semantic Scholar")
+        );
+        // Empty and null fields are left out.
+        assert!(listed[0].get("doi").is_none() && listed[0].get("retracted").is_none());
+
+        let all = report_view(&run, &papers, ReportRefs::All);
+        let all_refs = all["papers"][0]["refs"].as_array().unwrap();
+        assert_eq!(all_refs.len(), 7);
+        assert_eq!(all_refs[4]["fp_reason"], json!("known_good"));
+        assert_eq!(all_refs[5]["verdict"], json!("skipped"));
+        assert_eq!(all_refs[6]["verdict"], json!("pending"));
+        let none = report_view(&run, &papers, ReportRefs::None);
+        assert!(none["papers"][0]["refs"].as_array().unwrap().is_empty());
     }
 }

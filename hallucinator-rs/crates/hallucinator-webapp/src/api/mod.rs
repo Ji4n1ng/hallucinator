@@ -21,7 +21,9 @@ use crate::state::AppState;
 pub mod admin;
 pub mod auth;
 pub mod dbs;
+pub mod docs;
 pub mod runs;
+pub mod tokens;
 
 // ── errors ─────────────────────────────────────────────────────────────
 
@@ -224,7 +226,7 @@ async fn security_headers(req: Request, next: Next) -> Response {
 }
 
 async fn api_not_found() -> ApiError {
-    ApiError::not_found("No such API endpoint.")
+    ApiError::not_found("No such API endpoint. The API is documented at /api/docs.")
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -234,6 +236,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/password", post(auth::change_password))
+        .route("/docs", get(docs::guide))
+        .route("/docs/reference", get(docs::reference))
+        .route("/tokens", get(tokens::list).post(tokens::create))
+        .route("/tokens/{id}", delete(tokens::revoke))
         .route("/options", get(runs::options))
         .route(
             "/runs",
@@ -241,6 +247,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/runs/{id}", get(runs::detail).delete(runs::remove))
         .route("/runs/{id}/events", get(runs::events))
+        .route("/runs/{id}/report", get(runs::report))
         .route("/runs/{id}/cancel", post(runs::cancel))
         .route("/runs/{id}/export", get(runs::export))
         .route("/runs/{id}/papers/{pidx}/retry", post(runs::retry))
@@ -263,6 +270,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/admin/users/{id}",
             patch(admin::update_user).delete(admin::delete_user),
         )
+        .route("/admin/tokens", get(admin::tokens))
         .route("/admin/auth-events", get(admin::auth_events))
         .route("/admin/ip-blocks/{ip}", delete(admin::unblock_ip))
         .fallback(api_not_found);
@@ -271,6 +279,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(app_page))
         .route("/login", get(login_page))
         .route("/static/{name}", get(static_file))
+        .route("/llms.txt", get(docs::guide))
         .nest("/api", api)
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)

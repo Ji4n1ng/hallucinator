@@ -9,8 +9,8 @@ use serde_json::json;
 
 use super::{ApiError, ApiResult};
 use crate::auth::{
-    self, AuthUser, ClientIp, clear_session_cookie, hash_password_async, hash_token, minutes_text,
-    random_token, session_cookie, validate_password, verify_password_async,
+    self, ClientIp, SessionUser, clear_session_cookie, hash_password_async, hash_token,
+    minutes_text, random_token, session_cookie, validate_password, verify_password_async,
 };
 use crate::state::AppState;
 use crate::store::{User, now};
@@ -23,13 +23,24 @@ pub struct Credentials {
 
 pub async fn me(
     State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
     headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Lets scripts check their API token; a bad token is a 401, not "no user".
+    if let Some((_, user)) = auth::lookup_api_token(&state.store, &headers, &ip)? {
+        return Ok(Json(json!({
+            "user": user,
+            "csrf": null,
+            "auth": "token",
+            "bootstrap": false,
+        })));
+    }
     let session = auth::session_from_headers(&state, &headers);
     let bootstrap = state.store.count_users()? == 0;
     Ok(Json(json!({
         "user": session.as_ref().map(|(_, s)| &s.user),
         "csrf": session.as_ref().map(|(_, s)| &s.csrf_token),
+        "auth": session.as_ref().map(|_| "session"),
         // No accounts yet: the administrator is created from the shell
         // (`hallucinator-webapp create-user --admin`); the sign-in page says so.
         "bootstrap": bootstrap,
@@ -194,7 +205,7 @@ pub async fn login(
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     ClientIp(ip): ClientIp,
-    user: AuthUser,
+    user: SessionUser,
 ) -> ApiResult<Response> {
     state.store.delete_session(&user.token_hash)?;
     state
@@ -216,7 +227,7 @@ pub struct PasswordChange {
 pub async fn change_password(
     State(state): State<Arc<AppState>>,
     ClientIp(ip): ClientIp,
-    user: AuthUser,
+    user: SessionUser,
     Json(body): Json<PasswordChange>,
 ) -> ApiResult<StatusCode> {
     validate_password(&body.new_password).map_err(ApiError::bad_request)?;
