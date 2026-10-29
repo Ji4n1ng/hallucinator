@@ -1,5 +1,5 @@
 //! SQLite persistence: users, sessions, API tokens, sign-in audit trail,
-//! check history and reference-database job history.
+//! the API call audit log, check history and reference-database job history.
 //!
 //! One connection behind a mutex (WAL mode). Every statement here is a
 //! short indexed read/write, so callers use it inline from async handlers.
@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::model::{RefFacts, Stats};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'user',
     status        TEXT NOT NULL DEFAULT 'active',
+    kind          TEXT NOT NULL DEFAULT 'person',
     created_at    INTEGER NOT NULL,
     last_login_at INTEGER,
     failed_streak INTEGER NOT NULL DEFAULT 0,
@@ -67,6 +68,24 @@ CREATE TABLE IF NOT EXISTS auth_events (
 CREATE INDEX IF NOT EXISTS auth_events_ip_at ON auth_events(ip, kind, at);
 CREATE INDEX IF NOT EXISTS auth_events_at ON auth_events(at);
 CREATE INDEX IF NOT EXISTS auth_events_user ON auth_events(username COLLATE NOCASE, kind, at);
+
+-- API calls by agents, and calls by anyone that change data (see audit.rs).
+CREATE TABLE IF NOT EXISTS audit_log (
+    id       INTEGER PRIMARY KEY,
+    at       INTEGER NOT NULL,
+    username TEXT,
+    kind     TEXT NOT NULL,
+    method   TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    status   INTEGER NOT NULL,
+    ip       TEXT NOT NULL,
+    via      TEXT NOT NULL,
+    sealed   INTEGER NOT NULL DEFAULT 0,
+    detail   TEXT
+);
+CREATE INDEX IF NOT EXISTS audit_log_at ON audit_log(at);
+CREATE INDEX IF NOT EXISTS audit_log_user ON audit_log(username COLLATE NOCASE, id);
+CREATE INDEX IF NOT EXISTS audit_log_kind ON audit_log(kind, id);
 
 CREATE TABLE IF NOT EXISTS ip_blocks (
     ip    TEXT PRIMARY KEY,
@@ -155,13 +174,25 @@ pub struct User {
     pub username: String,
     pub role: String,
     pub status: String,
+    /// `person` or `agent`. Agent accounts belong to Catelier agents: they
+    /// sign in only with a token and are never administrators.
+    pub kind: String,
     pub created_at: i64,
     pub last_login_at: Option<i64>,
 }
 
+pub const KIND_PERSON: &str = "person";
+pub const KIND_AGENT: &str = "agent";
+
+/// Stored as an agent's password hash: no password ever verifies against it.
+pub const NO_PASSWORD: &str = "!";
+
 impl User {
     pub fn is_admin(&self) -> bool {
-        self.role == "admin"
+        self.role == "admin" && !self.is_agent()
+    }
+    pub fn is_agent(&self) -> bool {
+        self.kind == KIND_AGENT
     }
 }
 
@@ -221,6 +252,40 @@ pub struct AuthEvent {
     pub username: Option<String>,
     pub kind: String,
     pub detail: Option<String>,
+}
+
+/// One row of the API audit log.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub at: i64,
+    pub username: Option<String>,
+    /// `agent` or `person`.
+    pub kind: String,
+    pub method: String,
+    pub path: String,
+    pub status: i64,
+    pub ip: String,
+    /// How the caller signed in: `session`, `token`, `password` (a sign-in),
+    /// `cli` (an admin command on the server) or `none`.
+    pub via: String,
+    /// The call came through the end-to-end encrypted tunnel.
+    pub sealed: bool,
+    pub detail: Option<String>,
+}
+
+/// An audit row to write.
+#[derive(Debug, Clone)]
+pub struct NewAudit<'a> {
+    pub username: Option<&'a str>,
+    pub kind: &'a str,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub status: u16,
+    pub ip: &'a str,
+    pub via: &'a str,
+    pub sealed: bool,
+    pub detail: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -367,6 +432,7 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
         username: row.get("username")?,
         role: row.get("role")?,
         status: row.get("status")?,
+        kind: row.get("kind")?,
         created_at: row.get("created_at")?,
         last_login_at: row.get("last_login_at")?,
     })
@@ -377,7 +443,7 @@ fn json_vec(s: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-const USER_COLS: &str = "u.id, u.username, u.role, u.status, u.created_at, u.last_login_at";
+const USER_COLS: &str = "u.id, u.username, u.role, u.status, u.kind, u.created_at, u.last_login_at";
 const RUN_COLS: &str = "r.id, r.user_id, u.username, r.title, r.status, r.options_json, \
      r.created_at, r.started_at, r.finished_at, r.error, \
      (SELECT COUNT(*) FROM papers p WHERE p.run_id = r.id) AS paper_count";
@@ -476,8 +542,16 @@ impl Store {
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        // Version 2: account kinds (person or agent).
+        let has_kind = conn
+            .prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = 'kind'")?
+            .exists([])?;
+        if !has_kind {
+            conn.execute_batch("ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'person'")?;
+        }
         conn.execute(
-            "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?1)",
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![SCHEMA_VERSION.to_string()],
         )?;
         Ok(Store {
@@ -511,9 +585,13 @@ impl Store {
         Ok(())
     }
 
-    pub fn purge(&self, auth_event_retention_secs: i64) -> Result<()> {
+    pub fn purge(&self, auth_event_retention_secs: i64, audit_retention_secs: i64) -> Result<()> {
         let c = self.conn();
         let t = now();
+        c.execute(
+            "DELETE FROM audit_log WHERE at < ?1",
+            params![t - audit_retention_secs],
+        )?;
         c.execute("DELETE FROM sessions WHERE expires_at < ?1", params![t])?;
         c.execute("DELETE FROM ip_blocks WHERE until < ?1", params![t])?;
         c.execute(
@@ -571,9 +649,34 @@ impl Store {
             username: username.to_string(),
             role: role.to_string(),
             status: status.to_string(),
+            kind: KIND_PERSON.to_string(),
             created_at: t,
             last_login_at: None,
         })
+    }
+
+    /// Create an agent account: role `user`, no password (it signs in only
+    /// with a token).
+    pub fn create_agent(&self, name: &str) -> Result<User, StoreError> {
+        let id = {
+            let c = self.conn();
+            match c.execute(
+                "INSERT INTO users (username, password_hash, role, status, kind, created_at) \
+                 VALUES (?1, ?2, 'user', 'active', ?3, ?4)",
+                params![name, NO_PASSWORD, KIND_AGENT, now()],
+            ) {
+                Ok(_) => c.last_insert_rowid(),
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    return Err(StoreError::Conflict);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        self.get_user(id)
+            .map_err(StoreError::Other)?
+            .ok_or_else(|| StoreError::Other(anyhow::anyhow!("agent {name} vanished")))
     }
 
     pub fn user_auth_by_name(&self, username: &str) -> Result<Option<UserAuth>> {
@@ -860,6 +963,14 @@ impl Store {
         Ok(())
     }
 
+    /// Revoke every token of a user except `keep`. Returns how many went.
+    pub fn delete_user_tokens(&self, user_id: i64, keep: Option<i64>) -> Result<usize> {
+        Ok(self.conn().execute(
+            "DELETE FROM api_tokens WHERE user_id = ?1 AND id != COALESCE(?2, -1)",
+            params![user_id, keep],
+        )?)
+    }
+
     /// Revoke a token; with `owner`, only if it belongs to that user.
     /// Returns the revoked token.
     pub fn delete_api_token(&self, id: i64, owner: Option<i64>) -> Result<Option<ApiToken>> {
@@ -878,6 +989,65 @@ impl Store {
             c.execute("DELETE FROM api_tokens WHERE id = ?1", params![id])?;
         }
         Ok(token)
+    }
+
+    // ── API audit log ──
+
+    pub fn add_audit(&self, e: &NewAudit<'_>) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO audit_log (at, username, kind, method, path, status, ip, via, sealed, detail) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                now(),
+                e.username,
+                e.kind,
+                e.method,
+                e.path,
+                e.status,
+                e.ip,
+                e.via,
+                e.sealed,
+                e.detail
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Newest first. `account` matches the username (any case), `kind` is
+    /// `agent` or `person`, `before` pages back by id.
+    pub fn list_audit(
+        &self,
+        account: Option<&str>,
+        kind: Option<&str>,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<AuditEntry>> {
+        let c = self.conn();
+        let mut stmt = c.prepare(
+            "SELECT id, at, username, kind, method, path, status, ip, via, sealed, detail \
+             FROM audit_log \
+             WHERE (?1 IS NULL OR username = ?1 COLLATE NOCASE) \
+               AND (?2 IS NULL OR kind = ?2) AND (?3 IS NULL OR id < ?3) \
+             ORDER BY id DESC LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(params![account, kind, before, limit], |row| {
+                Ok(AuditEntry {
+                    id: row.get(0)?,
+                    at: row.get(1)?,
+                    username: row.get(2)?,
+                    kind: row.get(3)?,
+                    method: row.get(4)?,
+                    path: row.get(5)?,
+                    status: row.get(6)?,
+                    ip: row.get(7)?,
+                    via: row.get(8)?,
+                    sealed: row.get(9)?,
+                    detail: row.get(10)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     // ── auth audit / rate limiting ──

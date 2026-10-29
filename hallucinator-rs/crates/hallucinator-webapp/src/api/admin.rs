@@ -87,6 +87,11 @@ pub async fn update_user(
         if !matches!(r, "admin" | "user") {
             return Err(ApiError::bad_request("Role must be admin or user."));
         }
+        if r == "admin" && target.is_agent() {
+            return Err(ApiError::bad_request(
+                "Agent accounts cannot be administrators.",
+            ));
+        }
         if r == "user" && target.is_admin() {
             if is_self {
                 return Err(ApiError::bad_request(
@@ -158,6 +163,45 @@ pub async fn auth_events(
     Ok(Json(json!({
         "events": events,
         "blocked_ips": state.store.list_ip_blocks()?,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    /// A username (any case).
+    account: Option<String>,
+    /// `agent` or `person`.
+    kind: Option<String>,
+    /// Entries older than this id (the last `id` of the previous page).
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// The API audit log, newest first, filtered by account and kind.
+pub async fn audit(
+    State(state): State<Arc<AppState>>,
+    _admin: AdminUser,
+    Query(q): Query<AuditQuery>,
+) -> ApiResult<Json<Value>> {
+    let account = q
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty());
+    let kind = match q.kind.as_deref().map(str::trim) {
+        None | Some("" | "all") => None,
+        Some(k @ ("agent" | "person")) => Some(k),
+        Some(_) => return Err(ApiError::bad_request("kind must be agent or person.")),
+    };
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let entries = state.store.list_audit(account, kind, q.before, limit)?;
+    let next_before = (entries.len() as i64 == limit)
+        .then(|| entries.last().map(|e| e.id))
+        .flatten();
+    Ok(Json(json!({
+        "entries": entries,
+        "next_before": next_before,
+        "retention_days": crate::audit::RETENTION_SECS / 86400,
     })))
 }
 

@@ -9,6 +9,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap">
   <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/noble.js" defer></script>
+  <script src="/static/e2e.js" defer></script>
   <script src="/static/login.js" defer></script>
 </head>
 <body>
@@ -23,6 +25,20 @@
 
       <div id="notice" class="banner banner-info hidden" role="status" aria-live="polite"></div>
       <div id="lockout" class="lockout hidden" role="alert" aria-live="assertive"></div>
+
+      <form id="form-key" class="hidden" novalidate>
+        <p class="caption">This server encrypts every request end to end. Enter its
+          encryption key once on this device. Ask the administrator for it.</p>
+        <label class="field">
+          <span>Encryption key</span>
+          <input class="input mono" id="key-value" name="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="cek1_…" required>
+        </label>
+        <p id="key-plain-http" class="caption hidden">This page is on plain http, so the
+          browser cannot lock the key away: scripts on this site can read it. Use https
+          for stronger protection.</p>
+        <p id="key-error" class="field-error hidden" role="alert"></p>
+        <button class="btn btn-primary" id="key-submit" type="submit">Save key</button>
+      </form>
 
       <form id="form-signin" novalidate>
         <label class="field">

@@ -1,4 +1,5 @@
-//! HTTP layer. Route table lives in [`router`]; the contract is in API.md.
+//! HTTP layer. Route table lives in [`router`]; every route is documented in
+//! API-GUIDE.md (the `guide_and_routes_match` test checks both ways).
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -19,11 +20,15 @@ use crate::runs::SseMsg;
 use crate::state::AppState;
 
 pub mod admin;
+pub mod agent;
 pub mod auth;
 pub mod dbs;
 pub mod docs;
 pub mod runs;
 pub mod tokens;
+
+#[cfg(test)]
+mod tests;
 
 // ── errors ─────────────────────────────────────────────────────────────
 
@@ -155,6 +160,8 @@ const ASSETS: &[Asset] = &[
     asset!("app.css", "text/css; charset=utf-8"),
     asset!("app.js", "text/javascript; charset=utf-8"),
     asset!("login.js", "text/javascript; charset=utf-8"),
+    asset!("e2e.js", "text/javascript; charset=utf-8"),
+    asset!("noble.js", "text/javascript; charset=utf-8"),
     asset!("logo.svg", "image/svg+xml"),
 ];
 
@@ -185,18 +192,33 @@ async fn static_file(State(state): State<Arc<AppState>>, Path(name): Path<String
     asset_response(&state, &name)
 }
 
+// With end-to-end encryption the session never comes in a plain cookie, so
+// the pages are served as they are and their scripts find the session
+// through the tunnel. The pages themselves hold no data.
 async fn app_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if crate::auth::session_from_headers(&state, &headers).is_none() {
+    if state.e2e.is_none() && crate::auth::session_from_headers(&state, &headers).is_none() {
         return Redirect::to("/login").into_response();
     }
     asset_response(&state, "index.html")
 }
 
 async fn login_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if crate::auth::session_from_headers(&state, &headers).is_some() {
+    if state.e2e.is_none() && crate::auth::session_from_headers(&state, &headers).is_some() {
         return Redirect::to("/").into_response();
     }
     asset_response(&state, "login.html")
+}
+
+/// `POST /api/e2e` when no key is set (with a key, e2e.rs answers it).
+async fn e2e_off() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({
+            "detail": "End-to-end encryption is not enabled on this server",
+            "e2e": "off",
+        })),
+    )
+        .into_response()
 }
 
 async fn security_headers(req: Request, next: Next) -> Response {
@@ -232,6 +254,10 @@ async fn api_not_found() -> ApiError {
 pub fn router(state: Arc<AppState>) -> Router {
     let upload_limit = DefaultBodyLimit::max(state.settings.max_upload_bytes);
     let api = Router::new()
+        .route("/health", get(agent::health))
+        .route("/e2e", post(e2e_off))
+        .route("/agent/guide", get(agent::guide))
+        .route("/agent/whoami", get(agent::whoami))
         .route("/auth/me", get(auth::me))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
@@ -272,6 +298,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/admin/tokens", get(admin::tokens))
         .route("/admin/auth-events", get(admin::auth_events))
+        .route("/admin/audit", get(admin::audit))
         .route("/admin/ip-blocks/{ip}", delete(admin::unblock_ip))
         .fallback(api_not_found);
 
@@ -281,6 +308,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/static/{name}", get(static_file))
         .route("/llms.txt", get(docs::guide))
         .nest("/api", api)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::audit::middleware,
+        ))
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+/// The router inside the end-to-end tunnel (e2e.rs). The tunnel runs before
+/// routing, so the request inside an envelope is routed by its own path.
+pub fn app(state: Arc<AppState>) -> Router {
+    Router::new().fallback_service(router(state.clone())).layer(
+        axum::middleware::from_fn_with_state(state, crate::e2e::middleware),
+    )
 }

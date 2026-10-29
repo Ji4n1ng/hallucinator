@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::LoginPolicy;
+use crate::e2e::Keyring;
 use crate::jobs::JobManager;
 use crate::refdb::RefDbRegistry;
 use crate::runs::RunManager;
@@ -30,4 +31,6 @@ pub struct AppState {
     pub jobs: Arc<JobManager>,
     /// Cancelled on shutdown so long-lived SSE streams end.
     pub shutdown: CancellationToken,
+    /// End-to-end encryption keys; `None` when it is off (no key file).
+    pub e2e: Option<Arc<Keyring>>,
 }

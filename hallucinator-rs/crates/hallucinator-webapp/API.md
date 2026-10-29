@@ -1,14 +1,30 @@
 # hallucinator-webapp HTTP API
 
 Contract between the Rust server (`src/`) and its clients: the browser UI
-(`static/`) and scripts/agents using API tokens (task-oriented guide:
-[API-GUIDE.md](API-GUIDE.md), served at `GET /api/docs`).
-All JSON. Timestamps are **unix seconds** (integers). All `/api/*` routes
-except `GET /api/auth/me`, `POST /api/auth/login` and `GET /api/docs*`
-require a session cookie or an API token.
+(`static/`) and scripts/agents using API tokens (agent guide with every
+endpoint: [API-GUIDE.md](API-GUIDE.md), served at `GET /api/agent/guide` and
+`GET /api/docs`). All JSON. Timestamps are **unix seconds** (integers). All
+`/api/*` routes except `GET /api/health`, `GET /api/auth/me`,
+`POST /api/auth/login` and `GET /api/docs*` require a session cookie or an
+API token.
 
 ## Conventions
 
+- **End-to-end encryption** (when the server has `--e2e-key-file`): every
+  request goes sealed through `POST /api/e2e` (Catelier E2E protocol v1, see
+  `src/e2e.rs`). A plain request gets `400 {"detail","e2e":"required"}`, except
+  `GET /api/health` and the page shells and static files, which hold no data.
+  A session cookie that comes plain ends its session and is cleared. Through
+  the tunnel the session cookie travels inside the envelope, CSRF is not
+  needed, and SSE answers `406` (poll instead). `GET /api/health` →
+  `{"ok":true,"e2e":{"required":true,"kids":["<current>","<previous>"]}}`
+  (`{"required":false}` without a key).
+- **Agent accounts** (`kind: "agent"`): one per Catelier agent, role `user`,
+  no password (token only), never an administrator. Made and given tokens on
+  the server: `hallucinator-webapp agent add|list|issue|rotate|revoke`.
+- **Audit log**: every call by an agent account and every call that changes
+  data is recorded (`GET /api/admin/audit`): time, account, kind, method,
+  path (no query), status, address, `via` and `sealed`. Kept 90 days.
 - **Session**: `hallu_session` cookie (HttpOnly, SameSite=Lax). The client never
   reads it.
 - **CSRF**: every non-GET request to `/api/*` made with the session cookie must
@@ -39,6 +55,10 @@ require a session cookie or an API token.
 | `GET /static/<file>` | Static assets (`app.css`, `app.js`, `login.js`, `logo.svg`). |
 | `GET /llms.txt` | Same as `GET /api/docs`. |
 
+With end-to-end encryption on, `/` and `/login` are served as they are (no
+redirect: the session is checked through the tunnel by the page), and
+`/llms.txt` needs the tunnel like the API.
+
 The app shell is a hash-routed SPA:
 `#/` new check · `#/runs/<id>` run view · `#/history` · `#/databases` ·
 `#/admin` (admins) · `#/account`.
@@ -58,7 +78,10 @@ With an API token: `{"user":User,"csrf":null,"auth":"token","bootstrap":false}`;
 an invalid token is `401`.
 There is no self sign-up: accounts are created by administrators
 (`POST /api/admin/users`, or `hallucinator-webapp create-user` on the server).
-`User = {"id":1,"username":"alice","role":"admin"|"user","status":"active"|"pending"|"disabled","created_at":0,"last_login_at":0|null}`
+`User = {"id":1,"username":"alice","role":"admin"|"user","status":"active"|"pending"|"disabled","kind":"person"|"agent","created_at":0,"last_login_at":0|null}`
+
+### `GET /api/agent/whoami` → `{"name":"Frieren","kind":"agent"|"person","role":"user"|"admin"}`
+### `GET /api/agent/guide?section=<slug>` → `text/markdown` (API-GUIDE.md, or one `##` section; unknown slug `404`)
 
 ### `POST /api/auth/login`  `{"username","password"}`
 - `200 {"user": User}` + session cookie.
@@ -109,8 +132,12 @@ Defaults and choices for the new-check form.
 
 ## Runs (a "run" = one submission of one or more papers)
 
-### `POST /api/runs`  (multipart/form-data)
-Fields:
+### `POST /api/runs`  (multipart/form-data, or JSON)
+JSON form (for clients that send only JSON, e.g. `taskctl tool`):
+`{"files":[{"name":"paper.pdf","base64":"…"},{"name":"refs.bib","text":"…"}],"options":{…}}`
+— each file has `text` or `base64` (not both); the rest is as below.
+
+Multipart fields:
 - `files` — one or more files (repeat the field). `.pdf`, `.bib`, `.bbl`,
   `.xml` (GROBID TEI), `.zip`, `.tar.gz`/`.tgz` (expanded server-side).
 - `options` — JSON string:
@@ -311,4 +338,7 @@ Imports every reference marked safe in the run history into the local corpus.
 - `DELETE /api/admin/users/:id` → `204` (cannot delete yourself)
 - `DELETE /api/admin/ip-blocks/:ip` → `204` (lift an IP block early)
 - `GET /api/admin/tokens` → `{"tokens":[ApiToken]}` (every account's)
-- `GET /api/admin/auth-events?limit=100` → `{"events":[{"id":1,"at":0,"ip":"1.2.3.4","username":"bob","kind":"login_ok|login_fail|login_blocked|lockout|logout|ip_block|token_create|token_revoke","detail":null}],"blocked_ips":[{"ip":"1.2.3.4","until":0}]}`
+- `GET /api/admin/auth-events?limit=100` → `{"events":[{"id":1,"at":0,"ip":"1.2.3.4","username":"bob","kind":"login_ok|login_fail|login_blocked|lockout|logout|ip_block|token_create|token_revoke|token_issue|token_rotate|e2e_blocked","detail":null}],"blocked_ips":[{"ip":"1.2.3.4","until":0}]}`
+- `GET /api/admin/audit?account=<name>&kind=agent|person&limit=100&before=<id>` →
+  `{"entries":[{"id":81,"at":0,"username":"Frieren"|null,"kind":"agent"|"person","method":"GET"|"CLI","path":"/api/runs/9f2c…/report","status":200,"ip":"10.0.0.5","via":"token|session|password|cli|none","sealed":true,"detail":null}],"next_before":81|null,"retention_days":90}`
+  (newest first; `next_before` pages back; `CLI` rows are agent token changes made on the server).

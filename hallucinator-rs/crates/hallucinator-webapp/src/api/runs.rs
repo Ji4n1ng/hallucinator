@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Multipart, Path as UrlPath, Query, State};
+use axum::extract::{FromRequest, Multipart, Path as UrlPath, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
@@ -187,10 +187,82 @@ struct Saved {
     sha256: String,
 }
 
+/// Check a file name an upload gives: a safe basename of a type we read.
+fn upload_name(name: &str) -> ApiResult<String> {
+    let display = sanitize_filename(name);
+    if InputKind::from_name(&display).is_none() && !is_archive(&display) {
+        return Err(ApiError::bad_request(format!(
+            "{display}: unsupported file type. Upload .pdf, .bib, .bbl, .xml, .zip or .tar.gz files."
+        )));
+    }
+    Ok(display)
+}
+
+/// One file of a JSON upload: `text` for text files, `base64` for the rest.
+#[derive(Deserialize)]
+struct JsonFile {
+    name: String,
+    text: Option<String>,
+    base64: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JsonUpload {
+    files: Vec<JsonFile>,
+    #[serde(default)]
+    options: RunOptions,
+}
+
+/// `POST /api/runs` with a JSON body, for clients that send only JSON
+/// (`taskctl tool … --json`).
+fn save_json_upload(upload: JsonUpload, dir: &Path) -> ApiResult<(RunOptions, Vec<Saved>)> {
+    use base64::Engine;
+    if upload.files.len() > MAX_FILES {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_FILES} files per check."
+        )));
+    }
+    let mut saved = Vec::new();
+    for (i, f) in upload.files.into_iter().enumerate() {
+        let display = upload_name(&f.name)?;
+        let bytes = match (f.text, f.base64) {
+            (Some(t), None) => t.into_bytes(),
+            (None, Some(b)) => {
+                let clean: String = b.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+                base64::engine::general_purpose::STANDARD
+                    .decode(clean.trim_end_matches('='))
+                    .or_else(|_| {
+                        base64::engine::general_purpose::STANDARD_NO_PAD
+                            .decode(clean.trim_end_matches('='))
+                    })
+                    .map_err(|_| {
+                        ApiError::bad_request(format!("{display}: base64 is not valid."))
+                    })?
+            }
+            _ => {
+                return Err(ApiError::bad_request(format!(
+                    "{display}: give either \"text\" or \"base64\"."
+                )));
+            }
+        };
+        if bytes.is_empty() {
+            return Err(ApiError::bad_request(format!("{display} is empty.")));
+        }
+        let path = dir.join(format!("{i:03}-{display}"));
+        std::fs::write(&path, &bytes).map_err(anyhow::Error::from)?;
+        saved.push(Saved {
+            display_name: display,
+            path,
+            sha256: hex(&Sha256::digest(&bytes)),
+        });
+    }
+    Ok((upload.options, saved))
+}
+
 pub async fn create(
     State(state): State<Arc<AppState>>,
     AuthUser { user, .. }: AuthUser,
-    mut multipart: Multipart,
+    req: Request,
 ) -> ApiResult<Response> {
     let tmp_root = state.settings.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_root).map_err(anyhow::Error::from)?;
@@ -199,6 +271,32 @@ pub async fn create(
         .tempdir_in(&tmp_root)
         .map_err(anyhow::Error::from)?;
 
+    let json_body = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.trim_start().starts_with("application/json"));
+    let (opts, saved) = if json_body {
+        let Json(upload) = Json::<JsonUpload>::from_request(req, &state)
+            .await
+            .map_err(|e| ApiError::new(e.status(), e.body_text()))?;
+        save_json_upload(upload, uploads.path())?
+    } else {
+        let multipart = Multipart::from_request(req, &state)
+            .await
+            .map_err(|e| ApiError::new(e.status(), e.body_text()))?;
+        save_multipart(multipart, uploads.path()).await?
+    };
+    if saved.is_empty() {
+        return Err(ApiError::bad_request("Choose at least one file to check."));
+    }
+    finish_create(&state, &user, opts, saved, uploads).await
+}
+
+async fn save_multipart(
+    mut multipart: Multipart,
+    dir: &Path,
+) -> ApiResult<(RunOptions, Vec<Saved>)> {
     let mut opts = RunOptions::default();
     let mut saved: Vec<Saved> = Vec::new();
     while let Some(mut field) = multipart
@@ -221,13 +319,8 @@ pub async fn create(
                         "At most {MAX_FILES} files per check."
                     )));
                 }
-                let display = sanitize_filename(field.file_name().unwrap_or("upload"));
-                if InputKind::from_name(&display).is_none() && !is_archive(&display) {
-                    return Err(ApiError::bad_request(format!(
-                        "{display}: unsupported file type. Upload .pdf, .bib, .bbl, .xml, .zip or .tar.gz files."
-                    )));
-                }
-                let path = uploads.path().join(format!("{:03}-{display}", saved.len()));
+                let display = upload_name(field.file_name().unwrap_or("upload"))?;
+                let path = dir.join(format!("{:03}-{display}", saved.len()));
                 let mut file = std::fs::File::create(&path).map_err(anyhow::Error::from)?;
                 let mut hasher = Sha256::new();
                 let mut size = 0usize;
@@ -254,9 +347,16 @@ pub async fn create(
             }
         }
     }
-    if saved.is_empty() {
-        return Err(ApiError::bad_request("Choose at least one file to check."));
-    }
+    Ok((opts, saved))
+}
+
+async fn finish_create(
+    state: &AppState,
+    user: &User,
+    mut opts: RunOptions,
+    saved: Vec<Saved>,
+    uploads: tempfile::TempDir,
+) -> ApiResult<Response> {
     opts.disabled_dbs.retain(|d| d.len() <= 64);
     opts.disabled_dbs.truncate(64);
     opts.title = opts

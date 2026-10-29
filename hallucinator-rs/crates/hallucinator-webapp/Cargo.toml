@@ -42,6 +42,11 @@ rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
 argon2 = "0.5"
 rand = "0.8"
 sha2 = "0.10"
+# End-to-end encryption (Catelier E2E protocol v1, src/e2e.rs).
+aes-gcm = "0.10"
+hkdf = "0.12"
+flate2 = "1"
+percent-encoding = "2"
 base64 = "0.22"
 rapidfuzz = "0.5"
 clap = { version = "4", features = ["derive", "env"] }

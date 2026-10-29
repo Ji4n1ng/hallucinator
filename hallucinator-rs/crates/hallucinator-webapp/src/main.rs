@@ -1,6 +1,7 @@
 //! hallucinator-webapp — multi-user web interface for the hallucinated
 //! reference detector. See README.md in this crate.
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,7 +10,9 @@ use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 
 mod api;
+mod audit;
 mod auth;
+mod e2e;
 mod export;
 mod inputs;
 mod jobs;
@@ -78,6 +81,18 @@ struct Cli {
     #[arg(long, env = "HALLUCINATOR_WEB_STATIC_DIR", global = true)]
     static_dir: Option<PathBuf>,
 
+    /// File with the end-to-end encryption key (`cek1_…`, mode 600). When
+    /// set, every API call and sign-in must come through the tunnel
+    /// (`POST /api/e2e`); plain ones get HTTP 400 `"e2e": "required"`.
+    /// Make one with `e2e-key new <path>`.
+    #[arg(long, env = "HALLUCINATOR_E2E_KEY_FILE", global = true)]
+    e2e_key_file: Option<PathBuf>,
+
+    /// The previous key during a rotation (mode 600). Clients that still use
+    /// it are served, and told to change (`"rotate": true`).
+    #[arg(long, env = "HALLUCINATOR_E2E_KEY_PREVIOUS_FILE", global = true)]
+    e2e_key_previous_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -111,6 +126,253 @@ enum Command {
         #[arg(long)]
         expires_days: Option<i64>,
     },
+    /// Agent accounts for Catelier agents (kind `agent`, never admins) and
+    /// their tokens. A token is written only to standard output, which must
+    /// be a pipe: `agent issue Frieren | catelier-admin tool token hallucinator Frieren`.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+    /// End-to-end encryption keys.
+    E2eKey {
+        #[command(subcommand)]
+        action: E2eKeyAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentAction {
+    /// Create agent accounts: role `user`, kind `agent`, no password (they
+    /// sign in only with their token). Existing agent accounts are kept.
+    Add {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// List the agent accounts and their tokens (never the secrets).
+    List,
+    /// Issue a token for an agent that has none, to standard output.
+    Issue {
+        name: String,
+        /// Days until the token expires (default: never).
+        #[arg(long)]
+        expires_days: Option<i64>,
+    },
+    /// Issue a new token to standard output and revoke the agent's old ones.
+    Rotate {
+        name: String,
+        #[arg(long)]
+        expires_days: Option<i64>,
+    },
+    /// Revoke every token of the agent. It works at once, with no restart.
+    Revoke { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum E2eKeyAction {
+    /// Write a new random key to PATH (mode 600; never printed) and print its key id.
+    New { path: PathBuf },
+    /// Print the key id of the key in PATH (as `GET /api/health` lists it).
+    Kid { path: PathBuf },
+}
+
+/// The label of tokens made by `agent issue` and `agent rotate`.
+const AGENT_TOKEN_NAME: &str = "catelier";
+
+fn expires_at(days: Option<i64>) -> anyhow::Result<Option<i64>> {
+    match days {
+        Some(d) if d < 1 => anyhow::bail!("--expires-days must be at least 1"),
+        Some(d) => Ok(Some(store::now() + d * 86400)),
+        None => Ok(None),
+    }
+}
+
+fn agent_account(store: &store::Store, name: &str) -> anyhow::Result<store::User> {
+    let a = store
+        .user_auth_by_name(name)?
+        .ok_or_else(|| anyhow::anyhow!("no account '{name}'; create it with `agent add {name}`"))?;
+    if !a.user.is_agent() {
+        anyhow::bail!(
+            "'{}' is a person's account, not an agent's",
+            a.user.username
+        );
+    }
+    Ok(a.user)
+}
+
+/// Record an account or token change made on the command line in the audit log.
+fn audit_command(
+    store: &store::Store,
+    user: &store::User,
+    command: &str,
+    detail: &str,
+) -> anyhow::Result<()> {
+    store.add_audit(&store::NewAudit {
+        username: Some(&user.username),
+        kind: &user.kind,
+        method: "CLI",
+        path: command,
+        status: 0,
+        ip: "local",
+        via: "cli",
+        sealed: false,
+        detail: Some(detail),
+    })?;
+    Ok(())
+}
+
+/// Record an agent token change from the command line in the audit log.
+fn audit_cli(
+    store: &store::Store,
+    user: &store::User,
+    action: &str,
+    detail: &str,
+) -> anyhow::Result<()> {
+    store.add_audit(&store::NewAudit {
+        username: Some(&user.username),
+        kind: &user.kind,
+        method: "CLI",
+        path: &format!("agent {action}"),
+        status: 0,
+        ip: "local",
+        via: "cli",
+        sealed: false,
+        detail: Some(detail),
+    })?;
+    store.add_auth_event(
+        "cli",
+        Some(&user.username),
+        &format!("token_{action}"),
+        Some(detail),
+    )?;
+    Ok(())
+}
+
+fn run_agent(store: &store::Store, action: AgentAction) -> anyhow::Result<()> {
+    let issue = |name: &str, days: Option<i64>, rotate: bool| -> anyhow::Result<()> {
+        if std::io::stdout().is_terminal() {
+            anyhow::bail!(
+                "standard output is a terminal, and a token must not be shown. Pipe it, e.g. \
+                 `hallucinator-webapp agent {} {name} | catelier-admin tool token hallucinator {name}`",
+                if rotate { "rotate" } else { "issue" }
+            );
+        }
+        let user = agent_account(store, name)?;
+        let expires = expires_at(days)?;
+        let existing = store.count_api_tokens(user.id)?;
+        if !rotate && existing > 0 {
+            anyhow::bail!(
+                "{} already has {existing} token(s); use `agent rotate {}` to replace them",
+                user.username,
+                user.username
+            );
+        }
+        let (secret, token) = auth::issue_api_token(store, user.id, AGENT_TOKEN_NAME, expires)?;
+        let revoked = if rotate {
+            store.delete_user_tokens(user.id, Some(token.id))?
+        } else {
+            0
+        };
+        let action = if rotate { "rotate" } else { "issue" };
+        audit_cli(
+            store,
+            &user,
+            action,
+            &format!("token {}… issued, {revoked} revoked", token.prefix),
+        )?;
+        println!("{secret}");
+        eprintln!(
+            "{} a token for agent {} ({}…){}.",
+            if rotate { "Rotated" } else { "Issued" },
+            user.username,
+            token.prefix,
+            if rotate {
+                format!("; revoked {revoked} old token(s)")
+            } else {
+                String::new()
+            }
+        );
+        Ok(())
+    };
+    match action {
+        AgentAction::Add { names } => {
+            for name in names {
+                auth::validate_username(&name).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
+                match store.user_auth_by_name(&name)? {
+                    Some(a) if a.user.is_agent() => {
+                        println!("Agent {} exists (id {}).", a.user.username, a.user.id)
+                    }
+                    Some(a) => anyhow::bail!(
+                        "'{}' is a person's account, not an agent's",
+                        a.user.username
+                    ),
+                    None => {
+                        let u = store.create_agent(&name).map_err(|e| match e {
+                            store::StoreError::Conflict => anyhow::anyhow!("'{name}' exists"),
+                            store::StoreError::Other(e) => e,
+                        })?;
+                        println!("Created agent {} (id {}).", u.username, u.id);
+                    }
+                }
+            }
+        }
+        AgentAction::List => {
+            let tokens = store.list_api_tokens(None)?;
+            for u in store
+                .list_users()?
+                .into_iter()
+                .map(|a| a.user)
+                .filter(|u| u.is_agent())
+            {
+                let mine: Vec<String> = tokens
+                    .iter()
+                    .filter(|t| t.user_id == u.id)
+                    .map(|t| format!("{}… ({})", t.prefix, t.name))
+                    .collect();
+                println!(
+                    "{:<12} {:<8} {:<8} tokens: {}",
+                    u.username,
+                    u.role,
+                    u.status,
+                    if mine.is_empty() {
+                        "none".to_string()
+                    } else {
+                        mine.join(", ")
+                    }
+                );
+            }
+        }
+        AgentAction::Issue { name, expires_days } => issue(&name, expires_days, false)?,
+        AgentAction::Rotate { name, expires_days } => issue(&name, expires_days, true)?,
+        AgentAction::Revoke { name } => {
+            let user = agent_account(store, &name)?;
+            let n = store.delete_user_tokens(user.id, None)?;
+            audit_cli(store, &user, "revoke", &format!("{n} token(s) revoked"))?;
+            println!("Revoked {n} token(s) of agent {}.", user.username);
+        }
+    }
+    Ok(())
+}
+
+/// The keyring from the key files, or `None` when no key file is set.
+fn load_keyring(
+    key_file: Option<&PathBuf>,
+    previous_file: Option<&PathBuf>,
+    max_upload_bytes: usize,
+) -> anyhow::Result<Option<Arc<e2e::Keyring>>> {
+    let Some(path) = key_file else {
+        if previous_file.is_some() {
+            anyhow::bail!("--e2e-key-previous-file is set, but there is no --e2e-key-file");
+        }
+        return Ok(None);
+    };
+    let current = e2e::read_key_file(path, "the E2E key file")?;
+    let previous = match previous_file {
+        Some(p) => Some(e2e::read_key_file(p, "the previous E2E key file")?),
+        None => None,
+    };
+    // Room for a few of the largest uploads at once (each counts twice).
+    let keyring = e2e::Keyring::new(current, previous).with_budget(6 * max_upload_bytes);
+    Ok(Some(Arc::new(keyring)))
 }
 
 fn read_password() -> anyhow::Result<String> {
@@ -148,7 +410,10 @@ async fn main() -> anyhow::Result<()> {
             auth::validate_password(&pw).map_err(|e| anyhow::anyhow!(e))?;
             let role = if admin { "admin" } else { "user" };
             match store.create_user(&username, &auth::hash_password(&pw)?, role, "active") {
-                Ok(u) => println!("Created {} '{}' (id {}).", u.role, u.username, u.id),
+                Ok(u) => {
+                    audit_command(&store, &u, "create-user", &format!("role {}", u.role))?;
+                    println!("Created {} '{}' (id {}).", u.role, u.username, u.id)
+                }
                 Err(store::StoreError::Conflict) => anyhow::bail!("username already exists"),
                 Err(store::StoreError::Other(e)) => return Err(e),
             }
@@ -158,11 +423,20 @@ async fn main() -> anyhow::Result<()> {
             let a = store
                 .user_auth_by_name(&username)?
                 .ok_or_else(|| anyhow::anyhow!("no such user"))?;
+            if a.user.is_agent() {
+                anyhow::bail!("{} is an agent: agents have no password", a.user.username);
+            }
             let pw = read_password()?;
             auth::validate_password(&pw).map_err(|e| anyhow::anyhow!(e))?;
             store.set_password(a.user.id, &auth::hash_password(&pw)?)?;
             store.unlock_user(a.user.id)?;
             store.delete_user_sessions(a.user.id, None)?;
+            audit_command(
+                &store,
+                &a.user,
+                "reset-password",
+                "password reset, lockout cleared",
+            )?;
             println!("Password reset for '{}'.", a.user.username);
             return Ok(());
         }
@@ -176,17 +450,25 @@ async fn main() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("no such user"))?;
             let name = name.trim();
             auth::validate_token_name(name).map_err(|e| anyhow::anyhow!(e))?;
-            let expires_at = match expires_days {
-                Some(d) if d < 1 => anyhow::bail!("--expires-days must be at least 1"),
-                Some(d) => Some(store::now() + d * 86400),
-                None => None,
-            };
-            let (secret, token) = auth::issue_api_token(&store, a.user.id, name, expires_at)?;
+            if a.user.is_agent() {
+                anyhow::bail!(
+                    "{} is an agent: use `agent issue` or `agent rotate`",
+                    a.user.username
+                );
+            }
+            let (secret, token) =
+                auth::issue_api_token(&store, a.user.id, name, expires_at(expires_days)?)?;
             store.add_auth_event(
                 "cli",
                 Some(&a.user.username),
                 "token_create",
                 Some(&format!("{} ({}…)", token.name, token.prefix)),
+            )?;
+            audit_command(
+                &store,
+                &a.user,
+                "create-token",
+                &format!("token {} ({}…)", token.name, token.prefix),
             )?;
             eprintln!(
                 "Created API token '{}' for {} '{}'. It is shown only once:",
@@ -195,11 +477,36 @@ async fn main() -> anyhow::Result<()> {
             println!("{secret}");
             return Ok(());
         }
+        Some(Command::Agent { action }) => return run_agent(&store, action),
+        Some(Command::E2eKey { action }) => {
+            let key = match action {
+                E2eKeyAction::New { path } => {
+                    let k = e2e::write_new_key(&path)?;
+                    eprintln!("Wrote a new key to {} (mode 600).", path.display());
+                    k
+                }
+                E2eKeyAction::Kid { path } => e2e::read_key_file(&path, "the key file")?,
+            };
+            println!("{}", e2e::hex(&key.kid));
+            return Ok(());
+        }
         Some(Command::Serve) | None => {}
     }
 
+    let e2e_keys = load_keyring(
+        cli.e2e_key_file.as_ref(),
+        cli.e2e_key_previous_file.as_ref(),
+        cli.max_upload_mb.max(1) * 1024 * 1024,
+    )?;
+    match &e2e_keys {
+        Some(k) => tracing::info!(kids = ?k.kids(), "end-to-end encryption is required"),
+        None => tracing::warn!(
+            "end-to-end encryption is off (no --e2e-key-file): API calls and sign-ins go plain"
+        ),
+    }
+
     store.mark_interrupted()?;
-    store.purge(30 * 86400)?;
+    store.purge(audit::RETENTION_SECS, audit::RETENTION_SECS)?;
 
     // Same config resolution as hallucinator-cli.
     let (file_config, config_path) = match &cli.config {
@@ -273,6 +580,7 @@ async fn main() -> anyhow::Result<()> {
         runs,
         jobs: jobs_mgr,
         shutdown: shutdown.clone(),
+        e2e: e2e_keys,
     });
 
     // Hourly housekeeping: expired sessions, stale IP blocks, old audit rows.
@@ -282,7 +590,7 @@ async fn main() -> anyhow::Result<()> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
                 tick.tick().await;
-                if let Err(e) = store.purge(30 * 86400) {
+                if let Err(e) = store.purge(audit::RETENTION_SECS, audit::RETENTION_SECS) {
                     tracing::warn!(error = %e, "housekeeping failed");
                 }
             }
@@ -300,7 +608,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let app = api::router(state.clone());
+    let app = api::app(state.clone());
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     tracing::info!("listening on http://{}", cli.bind);
     axum::serve(

@@ -2,6 +2,9 @@
 //
 // Contract with the server: API.md (same crate). No framework, no build step.
 // All DOM is built with `h()` + textContent, never innerHTML with server data.
+// Every request goes through HalluE2E (e2e.js): plain, or sealed through the
+// end-to-end tunnel when the server requires it. Live progress then comes by
+// polling, since an event stream cannot be sealed.
 //
 // Sections:
 //   1. Utilities (DOM, formatting, links)
@@ -204,6 +207,24 @@
     location.href = expired ? "/login?expired=1" : "/login";
   }
 
+  /** The sign-in page's key step, with the reason the envelope failed. */
+  function toKey(code) {
+    location.href = "/login?e2e=" + encodeURIComponent(code || "required");
+  }
+
+  /** Send a request through HalluE2E; an envelope failure goes to the key step. */
+  async function send(path, init) {
+    try {
+      return await HalluE2E.fetch(path, init);
+    } catch (e) {
+      if (e instanceof HalluE2E.E2EError) {
+        toKey(e.code);
+        throw new ApiError(0, e.message);
+      }
+      throw new ApiError(0, "Network error — could not reach the server.");
+    }
+  }
+
   async function api(method, path, body) {
     const headers = { Accept: "application/json" };
     if (method !== "GET" && method !== "HEAD") headers["X-CSRF-Token"] = S.csrf || "";
@@ -213,12 +234,7 @@
       headers["Content-Type"] = "application/json";
       payload = JSON.stringify(body);
     }
-    let res;
-    try {
-      res = await fetch(path, { method, headers, body: payload, credentials: "same-origin" });
-    } catch (_) {
-      throw new ApiError(0, "Network error — could not reach the server.");
-    }
+    const res = await send(path, { method, headers, body: payload });
     if (res.status === 401) {
       toLogin(!!S.user);
       throw new ApiError(401, "Not signed in.");
@@ -236,6 +252,18 @@
       throw new ApiError(res.status, msg, data, ra);
     }
     return data;
+  }
+
+  /** A link to the API guide. Through the tunnel it is fetched sealed and shown as text. */
+  function docsLink(cls) {
+    return h("a", {
+      class: cls, href: "/api/docs", target: "_blank", rel: "noopener",
+      onclick: (e) => {
+        if (!HalluE2E.tunnel()) return;
+        e.preventDefault();
+        HalluE2E.openText("/api/docs").catch(showError);
+      },
+    }, "API guide");
   }
 
   function showError(e) {
@@ -703,6 +731,8 @@
   }
 
   async function boot() {
+    await HalluE2E.ready;
+    if (HalluE2E.needsKey()) { toKey("required"); return; }
     let me;
     try {
       me = await api("GET", "/api/auth/me");
@@ -928,7 +958,7 @@
     }
 
     // ── submit ───────────────────────────────────────────────────────
-    function onSubmit(e) {
+    async function onSubmit(e) {
       e.preventDefault();
       if (!st.files.length || st.uploading) return;
       errEl.classList.add("hidden");
@@ -953,11 +983,7 @@
       replace(uploadProg, pctText, bar);
       uploadProg.classList.remove("hidden");
 
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/runs");
-      xhr.setRequestHeader("X-CSRF-Token", S.csrf || "");
-      xhr.setRequestHeader("Accept", "application/json");
-      xhr.upload.onprogress = (ev) => {
+      const onUploadProgress = (ev) => {
         if (!ev.lengthComputable) return;
         const f = ev.loaded / ev.total;
         $(".bar", bar).style.width = (f * 100).toFixed(1) + "%";
@@ -971,18 +997,27 @@
         if (msg) { errEl.textContent = msg; errEl.classList.remove("hidden"); }
         renderFiles();
       };
-      xhr.onload = () => {
-        let data = null;
-        try { data = JSON.parse(xhr.responseText || "null"); } catch (_) { data = null; }
-        if (xhr.status === 401) { toLogin(true); return; }
-        if (xhr.status >= 200 && xhr.status < 300 && data && data.run_id) {
-          location.hash = "#/runs/" + encodeURIComponent(data.run_id);
-          return;
-        }
-        done((data && data.error) || (xhr.status === 413 ? "The upload is too large." : `Upload failed (HTTP ${xhr.status}).`));
-      };
-      xhr.onerror = () => done("Network error — the upload did not reach the server.");
-      xhr.send(fd);
+      if (HalluE2E.tunnel()) pctText.textContent = "Encrypting…";
+      let res;
+      try {
+        res = await send("/api/runs", {
+          method: "POST",
+          headers: { "X-CSRF-Token": S.csrf || "", Accept: "application/json" },
+          body: fd,
+          onUploadProgress,
+        });
+      } catch (e) {
+        done(e.status === 0 && !HalluE2E.tunnel() ? "Network error — the upload did not reach the server." : e.message);
+        return;
+      }
+      let data = null;
+      try { data = await res.json(); } catch (_) { data = null; }
+      if (res.status === 401) { toLogin(true); return; }
+      if (res.ok && data && data.run_id) {
+        location.hash = "#/runs/" + encodeURIComponent(data.run_id);
+        return;
+      }
+      done((data && data.error) || (res.status === 413 ? "The upload is too large." : `Upload failed (HTTP ${res.status}).`));
     }
 
     // ── recent runs ──────────────────────────────────────────────────
@@ -1117,9 +1152,30 @@
 
     const ALL = ["head", "stats", "papers", "paper", "toolbar", "table", "detail"];
 
-    // ── SSE ──────────────────────────────────────────────────────────
+    // ── live updates: SSE, or polling through the encrypted tunnel ───
+    function poll() {
+      if (!ctx.alive()) return;
+      clearTimeout(rv.reconnectTimer);
+      rv.ended = false;
+      api("GET", base).then((detail) => {
+        if (!ctx.alive()) return;
+        applySnapshot(detail);
+        if (!runActive()) { rv.ended = true; return; }
+        rv.reconnectTimer = setTimeout(poll, 2000);
+      }).catch((e) => {
+        if (!ctx.alive() || e.status === 401 || e.status === 0) return;
+        if (e.status === 404 || e.status === 403) {
+          rv.ended = true;
+          replace(root, h("div", { class: "container page" }, emptyState(e.status === 404 ? "Run not found" : "Not allowed", e.message, h("a", { class: "btn btn-primary", href: "#/history" }, "Back to history"))));
+          return;
+        }
+        rv.reconnectTimer = setTimeout(poll, 5000);
+      });
+    }
+
     function connect() {
       if (!ctx.alive()) return;
+      if (HalluE2E.tunnel()) { poll(); return; }
       if (rv.es) rv.es.close();
       clearTimeout(rv.reconnectTimer);
       rv.ended = false;
@@ -1295,7 +1351,16 @@
     function exportMenu() {
       const exp = { format: "json", scope: "run", problematic: false };
       return dropdown("Export", (close) => {
-        const link = h("a", { class: "btn btn-primary btn-sm", download: "", onclick: () => setTimeout(close, 0) }, "Download");
+        const link = h("a", {
+          class: "btn btn-primary btn-sm", download: "",
+          onclick: (e) => {
+            setTimeout(close, 0);
+            if (!HalluE2E.tunnel()) return;
+            // Through the tunnel the file is fetched sealed and saved from memory.
+            e.preventDefault();
+            HalluE2E.download(link.getAttribute("href")).catch(showError);
+          },
+        }, "Download");
         const update = () => {
           const params = new URLSearchParams({ format: exp.format, problematic: exp.problematic ? "1" : "0" });
           const p = paper();
@@ -2242,6 +2307,23 @@
       }).catch(showError);
     }
 
+    if (HalluE2E.tunnel()) {
+      // An event stream cannot be sealed: poll the job while it runs.
+      let timer = null;
+      const pollJob = () => {
+        if (!document.body.contains(m.el)) return;
+        api("GET", `/api/jobs/${encodeURIComponent(jobId)}`).then((d) => {
+          if (!d) return;
+          setJob(d.job);
+          pane.textContent = d.log || "";
+          scroll();
+          if (d.job.status === "running") timer = setTimeout(pollJob, 2000);
+        }).catch(showError);
+      };
+      es = { close: () => clearTimeout(timer) };
+      pollJob();
+      return;
+    }
     es = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
     let gotSnapshot = false;
     es.addEventListener("snapshot", (ev) => {
@@ -2333,7 +2415,7 @@
         h("div", { class: "row", style: { flexWrap: "nowrap" } }, field,
           h("button", { type: "button", class: "btn btn-secondary btn-sm", onclick: copy }, "Copy")),
         h("p", { class: "muted small" }, "Send it as ", h("code", null, "Authorization: Bearer <token>"), ". See the ",
-          h("a", { href: "/api/docs", target: "_blank", rel: "noopener" }, "API guide"), ".")),
+          docsLink(), ".")),
       actions: [done],
     });
     setTimeout(() => field.select(), 0);
@@ -2348,6 +2430,11 @@
     const tokensEl = h("div", null, skeleton(2));
     const eventsEl = h("div", null, skeleton(3));
     const blockedEl = h("div");
+    const auditEl = h("div", null, skeleton(3));
+    const auditMore = h("button", { type: "button", class: "btn btn-tertiary btn-sm hidden mt-sm" }, "Older entries");
+    const auditAccount = h("input", { class: "input input-sm", placeholder: "Account", "aria-label": "Account", autocomplete: "off", spellcheck: "false", style: { maxWidth: "200px" } });
+    const auditKind = h("select", { class: "input input-sm", "aria-label": "Kind", onchange: () => loadAudit() },
+      h("option", { value: "" }, "Agents and people"), h("option", { value: "agent" }, "Agents"), h("option", { value: "person" }, "People"));
 
     const uIn = h("input", { class: "input", autocomplete: "off", autocapitalize: "off", spellcheck: "false", maxlength: "32", placeholder: "username" });
     const pIn = h("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: "at least 10 characters" });
@@ -2387,11 +2474,50 @@
       h("section", { class: "section" }, createForm),
       h("section", { class: "section" },
         h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "API tokens"), h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: () => loadTokens() }, "Refresh")),
-        h("p", { class: "muted small", style: { marginBottom: "12px" } }, "Every account's tokens for scripts and agents. Users create their own on the Account page; ", h("code", null, "hallucinator-webapp create-token"), " creates one from the shell."),
+        h("p", { class: "muted small", style: { marginBottom: "12px" } }, "Every account's tokens for scripts and agents. Users create their own on the Account page; ", h("code", null, "hallucinator-webapp create-token"), " creates one from the shell. Agent tokens come from ", h("code", null, "hallucinator-webapp agent issue|rotate|revoke"), "."),
         tokensEl),
+      h("section", { class: "section" },
+        h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Audit log"), h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: () => loadAudit() }, "Refresh")),
+        h("p", { class: "muted small", style: { marginBottom: "12px" } }, "Every call by an agent, and every call by anyone that changes data, sign-ins and token changes included. Kept 90 days."),
+        h("form", { class: "row", style: { marginBottom: "12px" }, onsubmit: (e) => { e.preventDefault(); loadAudit(); } },
+          auditAccount, auditKind, h("button", { type: "submit", class: "btn btn-secondary btn-sm" }, "Filter")),
+        auditEl, auditMore),
       h("section", { class: "section" },
         h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Sign-in activity"), h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: () => loadEvents() }, "Refresh")),
         blockedEl, eventsEl)));
+
+    async function loadAudit(before) {
+      const params = new URLSearchParams({ limit: "100" });
+      if (auditAccount.value.trim()) params.set("account", auditAccount.value.trim());
+      if (auditKind.value) params.set("kind", auditKind.value);
+      if (before) params.set("before", String(before));
+      try {
+        const data = await api("GET", "/api/admin/audit?" + params.toString());
+        if (!ctx.alive()) return;
+        const entries = (data && data.entries) || [];
+        const rows = entries.map((e) => h("tr", null,
+          h("td", { class: "nowrap" }, timeEl(e.at)),
+          h("td", null, e.username || h("span", { class: "stone" }, "—")),
+          h("td", null, e.kind === "agent" ? badge("Agent", "badge-beta badge-sm") : badge("Person", "badge-outline badge-sm")),
+          h("td", { class: "small break" }, h("code", null, `${e.method} ${e.path}`), e.detail ? h("div", { class: "stone" }, e.detail) : null),
+          h("td", { class: "num" }, e.status ? h("span", { class: e.status >= 400 ? "text-bad" : "" }, String(e.status)) : "—"),
+          h("td", null, h("code", null, e.ip || "—")),
+          h("td", { class: "small" }, e.via, e.sealed ? h("span", { class: "stone", title: "Came through the end-to-end encrypted tunnel" }, " · sealed") : null)));
+        if (!before) {
+          if (!entries.length) { replace(auditEl, emptyState("No audit entries", "Agent calls and changes will be listed here.")); auditMore.classList.add("hidden"); return; }
+          replace(auditEl, h("div", { class: "table-wrap" }, h("table", { class: "data compact" },
+            h("thead", null, h("tr", null, h("th", null, "Time"), h("th", null, "Account"), h("th", null, "Kind"), h("th", null, "Call"), h("th", { class: "num" }, "Status"), h("th", null, "Address"), h("th", null, "Via"))),
+            h("tbody", null, rows))));
+        } else {
+          const tbody = $("tbody", auditEl);
+          if (tbody) append(tbody, rows);
+        }
+        auditMore.classList.toggle("hidden", !data.next_before);
+        auditMore.onclick = () => loadAudit(data.next_before);
+      } catch (e) {
+        if (ctx.alive()) replace(auditEl, h("p", { class: "field-error" }, e.message));
+      }
+    }
 
     async function patchUser(u, body, okMsg) {
       try {
@@ -2414,7 +2540,7 @@
           if (u.status === "pending") acts.appendChild(h("button", { type: "button", class: "btn btn-primary btn-xs", onclick: () => patchUser(u, { status: "active" }, `${u.username} approved.`) }, "Approve"));
           if (!self && u.status === "active") acts.appendChild(h("button", { type: "button", class: "btn btn-tertiary btn-xs", onclick: () => patchUser(u, { status: "disabled" }, `${u.username} disabled.`) }, "Disable"));
           if (!self && u.status === "disabled") acts.appendChild(h("button", { type: "button", class: "btn btn-tertiary btn-xs", onclick: () => patchUser(u, { status: "active" }, `${u.username} enabled.`) }, "Enable"));
-          if (!self) acts.appendChild(h("button", { type: "button", class: "btn btn-tertiary btn-xs", onclick: () => patchUser(u, { role: u.role === "admin" ? "user" : "admin" }, `${u.username} is now ${u.role === "admin" ? "a user" : "an administrator"}.`) }, u.role === "admin" ? "Make user" : "Make admin"));
+          if (!self && u.kind !== "agent") acts.appendChild(h("button", { type: "button", class: "btn btn-tertiary btn-xs", onclick: () => patchUser(u, { role: u.role === "admin" ? "user" : "admin" }, `${u.username} is now ${u.role === "admin" ? "a user" : "an administrator"}.`) }, u.role === "admin" ? "Make user" : "Make admin"));
           if (locked || u.failed_streak) acts.appendChild(h("button", { type: "button", class: "btn btn-secondary btn-xs", onclick: () => patchUser(u, { unlock: true }, `${u.username} unlocked.`) }, "Unlock"));
           if (!self) acts.appendChild(h("button", {
             type: "button", class: "btn btn-tertiary btn-xs",
@@ -2427,7 +2553,8 @@
           }, "Delete"));
           const statusB = u.status === "active" ? badge("Active", "badge-success badge-sm") : u.status === "pending" ? badge("Pending approval", "badge-warn badge-sm") : badge("Disabled", "badge-muted badge-sm");
           return h("tr", null,
-            h("td", null, h("div", { class: "row" }, h("span", { class: "t-title" }, u.username), self ? badge("you", "badge-outline badge-sm") : null)),
+            h("td", null, h("div", { class: "row" }, h("span", { class: "t-title" }, u.username), self ? badge("you", "badge-outline badge-sm") : null,
+              u.kind === "agent" ? badge("Agent", "badge-beta badge-sm", "A Catelier agent: signs in only with its token, never an administrator") : null)),
             h("td", null, u.role === "admin" ? badge("Admin", "badge-dark badge-sm") : badge("User", "badge-outline badge-sm")),
             h("td", null, h("div", { class: "row" }, statusB, locked ? badge(`Locked until ${new Date(u.locked_until * 1000).toLocaleTimeString()}`, "badge-error badge-sm", absTime(u.locked_until)) : null)),
             h("td", { class: "nowrap" }, timeEl(u.last_login_at)),
@@ -2469,6 +2596,9 @@
       logout: ["Sign-out", "badge-muted"],
       token_create: ["Token created", "badge-beta"],
       token_revoke: ["Token revoked", "badge-muted"],
+      token_issue: ["Agent token issued", "badge-beta"],
+      token_rotate: ["Agent token rotated", "badge-beta"],
+      e2e_blocked: ["Address blocked (E2E)", "badge-error"],
     };
 
     async function loadEvents() {
@@ -2506,6 +2636,7 @@
 
     loadUsers();
     loadTokens();
+    loadAudit();
     loadEvents();
   }
 
@@ -2593,7 +2724,7 @@
       },
     },
       h("div", { class: "row-between" }, h("h2", { class: "card-title" }, "API tokens"),
-        h("a", { class: "small", href: "/api/docs", target: "_blank", rel: "noopener" }, "API guide")),
+        docsLink("small")),
       h("p", { class: "muted small" }, "Scripts and agents use a token instead of your password: send it as ",
         h("code", null, "Authorization: Bearer <token>"), ". A token acts with your permissions, but cannot change your password or create tokens."),
       tokensEl,
@@ -2618,7 +2749,42 @@
 
     root.appendChild(h("div", { class: "container page", style: { maxWidth: "720px" } },
       h("div", { class: "page-head" }, h("div", null, h("h1", { class: "heading-lg" }, "Account"), h("p", { class: "muted" }, "Your profile, password and API tokens."))),
-      h("div", { class: "stack-lg" }, profileEl, form, tokenForm)));
+      h("div", { class: "stack-lg" }, profileEl, form, tokenForm, encryptionKeyCard())));
+  }
+
+  /** The end-to-end key this browser uses (e2e.js). Shown only when the server needs one. */
+  function encryptionKeyCard() {
+    const st = HalluE2E.state;
+    if (!HalluE2E.tunnel()) return null;
+    const input = h("input", { class: "input mono", type: "password", autocomplete: "off", spellcheck: "false", placeholder: "New key (cek1_…)", style: { flex: "1 1 240px" } });
+    const err = h("p", { class: "field-error hidden", role: "alert" });
+    const save = async (e) => {
+      e.preventDefault();
+      err.classList.add("hidden");
+      if (!input.value.trim()) return;
+      try {
+        await HalluE2E.enterKey(input.value);
+        input.value = "";
+        toast("Encryption key saved.", "success");
+        route();
+      } catch (ex) { err.textContent = ex.message; err.classList.remove("hidden"); }
+    };
+    const forget = async () => {
+      const ok = await confirmDialog({ title: "Forget the encryption key?", message: "This signs you out on this device. To sign in again, enter the key again.", confirmLabel: "Forget key and sign out", danger: true });
+      if (!ok) return;
+      await HalluE2E.forgetKey();
+      location.href = "/login";
+    };
+    return h("form", { class: "card stack", novalidate: true, onsubmit: save },
+      h("div", { class: "row-between" }, h("h3", { class: "card-title" }, "Encryption key"), badge("Set on this device", "badge-success badge-sm")),
+      h("p", { class: "muted small" }, "Every request from this browser is encrypted end to end with the server's key. ",
+        st.kid ? ["Key id ", h("code", null, st.kid), "."] : null),
+      st.rotate ? h("div", { class: "banner banner-warn" }, "The server has a new encryption key. Enter it below.") : null,
+      st.backend === "noble" ? h("div", { class: "banner banner-info" }, "This page is on plain http, so the browser cannot lock the key away: scripts on this site can read it. Use https for stronger protection.") : null,
+      h("div", { class: "row" }, input,
+        h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Replace key"),
+        h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: forget }, "Forget key")),
+      err);
   }
 
   // ════════════════════════════════════════════════════════════════════

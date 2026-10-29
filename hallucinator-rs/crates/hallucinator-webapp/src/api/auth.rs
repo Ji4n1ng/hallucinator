@@ -1,19 +1,20 @@
 use std::sync::Arc;
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
 
 use super::{ApiError, ApiResult};
+use crate::audit::{Actor, Slot};
 use crate::auth::{
     self, ClientIp, SessionUser, clear_session_cookie, hash_password_async, hash_token,
     minutes_text, random_token, session_cookie, validate_password, verify_password_async,
 };
 use crate::state::AppState;
-use crate::store::{User, now};
+use crate::store::{KIND_PERSON, User, now};
 
 #[derive(Deserialize)]
 pub struct Credentials {
@@ -24,10 +25,12 @@ pub struct Credentials {
 pub async fn me(
     State(state): State<Arc<AppState>>,
     ClientIp(ip): ClientIp,
+    Extension(slot): Extension<Slot>,
     headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
     // Lets scripts check their API token; a bad token is a 401, not "no user".
     if let Some((_, user)) = auth::lookup_api_token(&state.store, &headers, &ip)? {
+        slot.set(Actor::of(&user, "token"));
         return Ok(Json(json!({
             "user": user,
             "csrf": null,
@@ -78,6 +81,7 @@ fn start_session(
 pub async fn login(
     State(state): State<Arc<AppState>>,
     ClientIp(ip): ClientIp,
+    Extension(slot): Extension<Slot>,
     headers: HeaderMap,
     Json(body): Json<Credentials>,
 ) -> ApiResult<Response> {
@@ -88,6 +92,17 @@ pub async fn login(
     let policy = state.settings.policy.clone();
     let username: String = body.username.trim().chars().take(64).collect();
     let t = now();
+    // The audit log names the account tried, found or not. Agent accounts
+    // have no password, so their sign-in always fails like a wrong password.
+    let account = store.user_auth_by_name(&username)?;
+    slot.set(match &account {
+        Some(a) => Actor::of(&a.user, "password"),
+        None => Actor {
+            username: username.clone(),
+            kind: KIND_PERSON.to_string(),
+            via: "password",
+        },
+    });
 
     // 1. Per-IP block (password spraying across usernames).
     if let Some(until) = store.ip_blocked_until(&ip)? {
@@ -103,7 +118,6 @@ pub async fn login(
 
     // 2. Per-account lockout: do not even check the password. Unknown
     //    usernames are locked the same way, from the audit trail.
-    let account = store.user_auth_by_name(&username)?;
     let locked_until = match &account {
         Some(a) => a.locked_until,
         None => {
@@ -124,8 +138,11 @@ pub async fn login(
     }
 
     // 3. Verify (dummy hash for unknown users: same cost, no enumeration).
+    // Agents have no password: they cost one verification too, so the
+    // answer time does not tell which accounts are agents.
     let hash = account
         .as_ref()
+        .filter(|a| !a.user.is_agent())
         .map(|a| a.password_hash.clone())
         .unwrap_or_else(|| auth::dummy_hash().to_string());
     let ok = verify_password_async(body.password, hash).await && account.is_some();

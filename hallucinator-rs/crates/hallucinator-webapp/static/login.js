@@ -1,7 +1,9 @@
 // hallucinator-webapp — sign-in page. Accounts are created by administrators
 // (Admin page or `hallucinator-webapp create-user`); there is no self sign-up.
-// Talks to /api/auth/{me,login} (see API.md). No inline handlers:
-// everything is wired up here after DOMContentLoaded (script is `defer`).
+// Talks to /api/auth/{me,login} (see API.md) through HalluE2E (e2e.js): when
+// the server requires end-to-end encryption, the key step comes first and
+// every request goes sealed. No inline handlers: everything is wired up here
+// after DOMContentLoaded (script is `defer`).
 "use strict";
 
 (function () {
@@ -26,9 +28,8 @@
   }
 
   async function postJSON(url, body) {
-    const res = await fetch(url, {
+    const res = await HalluE2E.fetch(url, {
       method: "POST",
-      credentials: "same-origin",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(body),
     });
@@ -118,12 +119,69 @@
           $("si-password").focus();
         }
       }
-    } catch (_) {
-      setError(err, "Network error — is the server running?");
+    } catch (e) {
+      if (e instanceof HalluE2E.E2EError) showKeyStep(e.message);
+      else setError(err, "Network error — is the server running?");
     } finally {
       btn.textContent = "Sign in";
       if (!btn.dataset.locked) btn.disabled = false;
     }
+  }
+
+  // ── encryption key ──────────────────────────────────────────────────
+  function showKeyStep(msg) {
+    $("auth-heading").textContent = "Encryption key";
+    document.title = "Encryption key · Hallucinator";
+    show($("form-signin"), false);
+    show($("form-key"), true);
+    show($("key-plain-http"), HalluE2E.state.backend === "noble");
+    setError($("key-error"), msg && msg !== HalluE2E.message("required") ? msg : "");
+    $("key-value").focus();
+  }
+
+  function showSignin() {
+    $("auth-heading").textContent = "Sign in";
+    document.title = "Sign in · Hallucinator";
+    show($("form-key"), false);
+    show($("form-signin"), true);
+    $("si-username").focus();
+  }
+
+  async function onKey(e) {
+    e.preventDefault();
+    const err = $("key-error");
+    setError(err, "");
+    const value = $("key-value").value;
+    if (!value.trim()) {
+      setError(err, "Enter the encryption key.");
+      return;
+    }
+    const btn = $("key-submit");
+    btn.disabled = true;
+    try {
+      await HalluE2E.enterKey(value);
+      $("key-value").value = "";
+      setNotice("Encryption key saved on this device.", "info");
+      if (await signedIn()) return;
+      showSignin();
+    } catch (ex) {
+      setError(err, ex.message || String(ex));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /** Go to the app when a session exists; show the bootstrap note when no account does. */
+  async function signedIn() {
+    const res = await HalluE2E.fetch("/api/auth/me", { headers: { Accept: "application/json" } });
+    if (!res.ok) return false;
+    const me = await res.json();
+    if (me && me.user) {
+      location.replace("/");
+      return true;
+    }
+    if (me && me.bootstrap) showBootstrap();
+    return false;
   }
 
   // No accounts exist yet: point at the shell command that creates the admin.
@@ -141,21 +199,25 @@
   // ── boot ────────────────────────────────────────────────────────────
   async function boot() {
     $("form-signin").addEventListener("submit", onSignin);
+    $("form-key").addEventListener("submit", onKey);
+    const params = new URLSearchParams(location.search);
 
+    await HalluE2E.ready;
+    // The app sends people here with ?e2e=<code> when an envelope failed.
+    const code = params.get("e2e");
+    if (HalluE2E.needsKey() || (code && HalluE2E.tunnel())) {
+      showKeyStep(code ? HalluE2E.message(code) : "");
+      return;
+    }
     try {
-      const res = await fetch("/api/auth/me", { credentials: "same-origin", headers: { Accept: "application/json" } });
-      if (res.ok) {
-        const me = await res.json();
-        if (me && me.user) {
-          location.replace("/");
-          return;
-        }
-        if (me && me.bootstrap) showBootstrap();
+      if (await signedIn()) return;
+    } catch (e) {
+      if (e instanceof HalluE2E.E2EError) {
+        showKeyStep(e.message);
+        return;
       }
-    } catch (_) {
       setNotice("Could not reach the server.", "error");
     }
-    const params = new URLSearchParams(location.search);
     if (params.get("expired")) setNotice("Your session expired. Please sign in again.", "info");
     $("si-username").focus();
   }

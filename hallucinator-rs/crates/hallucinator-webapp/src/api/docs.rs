@@ -1,5 +1,7 @@
-//! API documentation served to scripts and agents: the task-oriented guide
-//! (`API-GUIDE.md`) and the full contract (`API.md`), both public.
+//! API documentation served to scripts and agents: the agent guide
+//! (`API-GUIDE.md`, also at `/api/agent/guide`) and the full contract
+//! (`API.md`). They need no account. With end-to-end encryption on they come
+//! only through the tunnel, like every other call.
 
 use std::sync::Arc;
 
@@ -9,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
 
-const GUIDE: &str = include_str!("../../API-GUIDE.md");
+pub const GUIDE: &str = include_str!("../../API-GUIDE.md");
 const REFERENCE: &str = include_str!("../../API.md");
 
 /// `scheme://host` the client reached us at, for copy-paste examples.
@@ -36,7 +38,7 @@ fn base_url(state: &AppState, headers: &HeaderMap) -> String {
     format!("{proto}://{host}")
 }
 
-fn markdown(body: String) -> Response {
+pub fn markdown(body: String) -> Response {
     (
         [
             (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),

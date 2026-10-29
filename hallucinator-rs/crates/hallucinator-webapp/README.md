@@ -46,14 +46,49 @@ databases not named in the config are auto-detected in
 | `--session-hours` | 168 | session lifetime |
 | `--stale-after-days` | 30 | when a database is flagged stale |
 | `--static-dir` | embedded | serve `static/` from disk (UI development) |
+| `--e2e-key-file` / `HALLUCINATOR_E2E_KEY_FILE` | off | end-to-end encryption key (`cek1_…`, mode 600); when set, every API call and page request that holds data must come through the tunnel |
+| `--e2e-key-previous-file` / `HALLUCINATOR_E2E_KEY_PREVIOUS_FILE` | off | the previous key during a rotation |
 
 Account maintenance from the shell:
 
 ```bash
 HALLUCINATOR_WEB_PASSWORD=… hallucinator-webapp create-user --username alice --admin
 hallucinator-webapp reset-password --username alice   # also clears lockouts
-hallucinator-webapp create-token --username agent --name "claude skill"   # prints an API token
+hallucinator-webapp create-token --username alice --name "laptop"   # prints an API token (people's accounts)
 ```
+
+Agent accounts (one per Catelier agent, kind `agent`, role `user`, no
+password, never an admin) and their tokens. A token goes only to standard
+output, which must be a pipe, so it is never shown:
+
+```bash
+hallucinator-webapp agent add Frieren Fern …      # create agent accounts
+hallucinator-webapp agent list                    # accounts and token prefixes
+hallucinator-webapp agent issue Frieren | catelier-admin tool token hallucinator Frieren
+hallucinator-webapp agent rotate Frieren | catelier-admin tool token hallucinator Frieren
+hallucinator-webapp agent revoke Frieren          # works at once, no restart
+```
+
+### End-to-end encryption
+
+Catelier's E2E protocol v1 (`src/e2e.rs`, `static/e2e.js`; the agent tool
+standard). HTTPS does not replace it: Cloudflare and other proxies end TLS
+and can read the traffic.
+
+```bash
+hallucinator-webapp e2e-key new ~/.config/hallucinator/e2e.key   # mode 600; prints only the key id
+# in the unit: Environment=HALLUCINATOR_E2E_KEY_FILE=%h/.config/hallucinator/e2e.key
+deploy/install-user-service.sh 0.0.0.0:8301 ~/.config/hallucinator/e2e.key
+```
+
+With a key, plain API calls get `400 {"e2e":"required"}`; `GET /api/health`
+lists the key ids. Browsers show a key screen first (type the `cek1_…` key
+once per device); then every request goes sealed and live progress comes
+by polling. On plain http (a LAN address) the browser has no WebCrypto, so
+the vendored `static/noble.js` does the AES-GCM, and the key is kept where
+scripts on the page can read it. Agents call through `taskctl tool
+hallucinator …`. To rotate: make a new key, move the old file to
+`--e2e-key-previous-file`, restart, update clients, then drop the old one.
 
 ### Running in the background
 
@@ -132,7 +167,13 @@ For anything beyond localhost put it behind a TLS reverse proxy and run with
   never attach `Authorization` on their own). A wrong token is a 401 with no
   cookie fallback. Tokens cannot sign out, change the password or manage
   tokens, so a leaked one cannot mint more; disabling the account stops its
-  tokens. Use a non-admin account for agents.
+  tokens. Agents use agent accounts (never admins).
+- End-to-end encryption (optional, see above): sealed envelopes with replay
+  and clock checks; an address whose envelopes fail to decrypt 10 times in
+  10 minutes is refused for 15 minutes; a session cookie sent plain ends
+  its session.
+- Audit log of every agent call and every change (Admin page,
+  `GET /api/admin/audit`), kept 90 days; no query strings or bodies.
 - Strict CSP (no inline script), `nosniff`, `frame-ancestors 'none'`; the UI
   never inserts server data as HTML; exports are served as sandboxed
   attachments; uploads are validated, kept in a temp dir only while being

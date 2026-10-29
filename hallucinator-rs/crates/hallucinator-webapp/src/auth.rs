@@ -9,6 +9,13 @@
 //! password or manage tokens ([`SessionUser`]), so a leaked token cannot
 //! mint more of itself.
 //!
+//! Agent accounts (`kind = agent`) have no password and are never
+//! administrators, whatever their stored role ([`User::is_admin`]).
+//!
+//! A request that came through the end-to-end tunnel (e2e.rs) carries the
+//! [`Sealed`] marker and needs no CSRF token: a cross-site page cannot seal
+//! an envelope without the key, and the session cookie travels only inside it.
+//!
 //! Brute-force policy (see [`LoginPolicy`]):
 //! * per account: `account_threshold` consecutive failures lock the account
 //!   for `base_lock`, doubling for each consecutive lockout up to `max_lock`;
@@ -33,6 +40,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::api::ApiError;
+use crate::audit::{Actor, Slot};
 use crate::state::AppState;
 use crate::store::{Session, Store, User};
 
@@ -40,6 +48,10 @@ pub const SESSION_COOKIE: &str = "hallu_session";
 
 /// Every API token starts with this, so leaked tokens are easy to spot.
 pub const API_TOKEN_PREFIX: &str = "hallu_";
+
+/// Marks a request that came through the end-to-end tunnel (e2e.rs).
+#[derive(Debug, Clone, Copy)]
+pub struct Sealed;
 
 #[derive(Debug, Clone)]
 pub struct LoginPolicy {
@@ -324,12 +336,14 @@ pub enum Credential {
 }
 
 /// Authenticate a request: an API token if one is sent, else the session
-/// cookie, which must come with the CSRF token on state-changing methods.
+/// cookie, which must come with the CSRF token on state-changing methods
+/// (unless the request came `sealed` through the tunnel).
 pub fn authenticate(
     store: &Store,
     headers: &HeaderMap,
     method: &Method,
     ip: &str,
+    sealed: bool,
 ) -> Result<(User, Credential), ApiError> {
     if let Some((id, user)) = lookup_api_token(store, headers, ip)? {
         return Ok((user, Credential::ApiToken(id)));
@@ -337,7 +351,7 @@ pub fn authenticate(
     let (token_hash, session) =
         lookup_session(store, headers).ok_or_else(|| ApiError::unauthorized("Please sign in."))?;
     let safe = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
-    if !safe {
+    if !safe && !sealed {
         let sent = headers
             .get("x-csrf-token")
             .and_then(|v| v.to_str().ok())
@@ -369,7 +383,16 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         let ClientIp(ip) = ClientIp::from_request_parts(parts, state)
             .await
             .unwrap_or_else(|never| match never {});
-        let (user, credential) = authenticate(&state.store, &parts.headers, &parts.method, &ip)?;
+        let sealed = parts.extensions.get::<Sealed>().is_some();
+        let (user, credential) =
+            authenticate(&state.store, &parts.headers, &parts.method, &ip, sealed)?;
+        if let Some(slot) = parts.extensions.get::<Slot>() {
+            let via = match credential {
+                Credential::Session(_) => "session",
+                Credential::ApiToken(_) => "token",
+            };
+            slot.set(Actor::of(&user, via));
+        }
         Ok(AuthUser { user, credential })
     }
 }
@@ -528,7 +551,8 @@ mod tests {
         let t = store
             .create_api_token(user.id, "agent", &hash_token(&token), "hallu_", None)
             .unwrap();
-        let (u, cred) = authenticate(&store, &bearer(&token), &Method::POST, "1.2.3.4").unwrap();
+        let (u, cred) =
+            authenticate(&store, &bearer(&token), &Method::POST, "1.2.3.4", false).unwrap();
         assert_eq!((u.id, cred), (user.id, Credential::ApiToken(t.id)));
         let listed = &store.list_api_tokens(Some(user.id)).unwrap()[0];
         assert_eq!(listed.last_used_ip.as_deref(), Some("1.2.3.4"));
@@ -536,12 +560,12 @@ mod tests {
         // A wrong token is a 401 even when a session cookie is also sent.
         let mut h = bearer("hallu_wrong");
         h.insert(header::COOKIE, "hallu_session=whatever".parse().unwrap());
-        let e = authenticate(&store, &h, &Method::GET, "ip").unwrap_err();
+        let e = authenticate(&store, &h, &Method::GET, "ip", false).unwrap_err();
         assert_eq!(e.status, axum::http::StatusCode::UNAUTHORIZED);
 
         // Revoked.
         store.delete_api_token(t.id, None).unwrap();
-        assert!(authenticate(&store, &bearer(&token), &Method::GET, "ip").is_err());
+        assert!(authenticate(&store, &bearer(&token), &Method::GET, "ip", false).is_err());
     }
 
     #[test]
@@ -551,15 +575,15 @@ mod tests {
         store
             .create_api_token(user.id, "old", &hash_token(&token), "hallu_", Some(1))
             .unwrap();
-        assert!(authenticate(&store, &bearer(&token), &Method::GET, "ip").is_err());
+        assert!(authenticate(&store, &bearer(&token), &Method::GET, "ip", false).is_err());
 
         let fresh = new_api_token();
         store
             .create_api_token(user.id, "new", &hash_token(&fresh), "hallu_", None)
             .unwrap();
-        assert!(authenticate(&store, &bearer(&fresh), &Method::GET, "ip").is_ok());
+        assert!(authenticate(&store, &bearer(&fresh), &Method::GET, "ip", false).is_ok());
         store.set_user_status(user.id, "disabled").unwrap();
-        assert!(authenticate(&store, &bearer(&fresh), &Method::GET, "ip").is_err());
+        assert!(authenticate(&store, &bearer(&fresh), &Method::GET, "ip", false).is_err());
     }
 
     #[test]
@@ -574,13 +598,13 @@ mod tests {
             header::COOKIE,
             format!("{SESSION_COOKIE}={token}").parse().unwrap(),
         );
-        let (_, cred) = authenticate(&store, &h, &Method::GET, "ip").unwrap();
+        let (_, cred) = authenticate(&store, &h, &Method::GET, "ip", false).unwrap();
         assert_eq!(cred, Credential::Session(hash_token(&token)));
-        let e = authenticate(&store, &h, &Method::POST, "ip").unwrap_err();
+        let e = authenticate(&store, &h, &Method::POST, "ip", false).unwrap_err();
         assert_eq!(e.status, axum::http::StatusCode::FORBIDDEN);
         h.insert("x-csrf-token", "csrf-1".parse().unwrap());
-        assert!(authenticate(&store, &h, &Method::POST, "ip").is_ok());
-        let e = authenticate(&store, &HeaderMap::new(), &Method::GET, "ip").unwrap_err();
+        assert!(authenticate(&store, &h, &Method::POST, "ip", false).is_ok());
+        let e = authenticate(&store, &HeaderMap::new(), &Method::GET, "ip", false).unwrap_err();
         assert_eq!(e.status, axum::http::StatusCode::UNAUTHORIZED);
     }
 

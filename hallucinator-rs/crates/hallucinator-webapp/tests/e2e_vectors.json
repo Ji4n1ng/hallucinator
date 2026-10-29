@@ -1,0 +1,174 @@
+{
+  "format": [
+    "Test vectors for Catelier end-to-end encryption, version 1. Made by server/tests/test_e2e.py.",
+    "All binary values are lowercase hex. Times are Unix milliseconds. JSON meta is UTF-8.",
+    "keys[]: key (the cek1_ string the user enters), master = its 32 bytes,",
+    "  enc = HKDF-SHA256(master, salt empty, info 'catelier e2e v1 enc', 32), kid = same with info 'catelier e2e v1 kid', 8 bytes.",
+    "bad_keys[]: strings a client must refuse before use.",
+    "requests[] and responses[]: envelope = version 01 | direction (01 request, 02 response) | kid | ts_ms uint64 BE | nonce (12)",
+    "  | AES-256-GCM(enc, nonce, plaintext, aad) ciphertext with its 16-byte tag appended.",
+    "  aad = the first 30 bytes; for a response also the request's nonce (request_nonce): 42 bytes.",
+    "  plaintext = uint32 BE length of meta_json | meta_json | body. Use meta_json as given to test seal;",
+    "  to test open, parse the meta JSON (key order and spacing may differ in real traffic).",
+    "  Request meta: m (method, or WS), p (path and query), h (lowercase header names to string values), cn (WS only).",
+    "  Response meta: s (status), h (header names to strings; set-cookie is always a list), rotate (true when the old key was used).",
+    "ws: ws_key = HKDF-SHA256(master, salt = cn | sn, info 'catelier e2e v1 ws', 32). cn and sn are 16 bytes,",
+    "  sent as standard base64 in the handshake meta. frames[]: frame = type (01 text, 02 bytes) | counter uint64 BE",
+    "  | AES-256-GCM(ws_key, nonce = direction uint32 BE | counter uint64 BE, data, aad = type | counter).",
+    "  direction 1 = client to server, 2 = server to client. Each side counts its own frames from 0.",
+    "invalid[]: envelopes a receiver must refuse, with the server's error code (HTTP 400, JSON {detail, e2e})."
+  ],
+  "keys": [
+    {
+      "key": "cek1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "master": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "enc": "156e8ed48751b02199176b11e5560d886cdbe779d96c78c8ffe0df837249c967",
+      "kid": "1f112aa78ba5eef7"
+    },
+    {
+      "key": "cek1_ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+      "master": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "enc": "14db0f15ea90830ae19ea643fb37683ae50d3e543311969da5cf860ee2be725b",
+      "kid": "717350049d01d7e6"
+    }
+  ],
+  "bad_keys": [
+    "cek1_AAAA",
+    "cek2_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "cek1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8A",
+    "cek1_*******************************************",
+    "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  ],
+  "requests": [
+    {
+      "name": "login",
+      "kid": "1f112aa78ba5eef7",
+      "ts_ms": 1760000000000,
+      "nonce": "010101010101010101010101",
+      "meta_json": "{\"m\":\"POST\",\"p\":\"/api/auth/login\",\"h\":{\"content-type\":\"application/json\",\"cookie\":\"catelier_device=abc\"}}",
+      "body": "7b22757365726e616d65223a2261646d696e222c2270617373776f7264223a22736563726574227d",
+      "plaintext": "000000697b226d223a22504f5354222c2270223a222f6170692f617574682f6c6f67696e222c2268223a7b22636f6e74656e742d74797065223a226170706c69636174696f6e2f6a736f6e222c22636f6f6b6965223a22636174656c6965725f6465766963653d616263227d7d7b22757365726e616d65223a2261646d696e222c2270617373776f7264223a22736563726574227d",
+      "envelope": "01011f112aa78ba5eef700000199c82cc00001010101010101010101010113fec771166ac7da9b47ab481015e7ec5a5605ba2451d9c14f51e2c6ea8dbfac62d35313a151148fc628d0c1e3bcd5bb82d492289915f8a04e9087cb4a83eb69dfbe1070b772c861fa1f2daeca0d27a577cae0f6838e877839adc7f04ab4d6e3f2b7f7ef38da8cb2abbc2e4dfa3142bdf9ca5a0dd978f19420996644848ad579eb72693dd1a388b3d2d6f1f8aa83c8ac7c6077dd06f3da45931179de2d7b656ffc7a334ea6"
+    },
+    {
+      "name": "get with query",
+      "kid": "1f112aa78ba5eef7",
+      "ts_ms": 1760000000001,
+      "nonce": "020202020202020202020202",
+      "meta_json": "{\"m\":\"GET\",\"p\":\"/api/tasks?project=CAT&limit=5\",\"h\":{\"authorization\":\"Bearer cus_example\"}}",
+      "body": "",
+      "plaintext": "0000005b7b226d223a22474554222c2270223a222f6170692f7461736b733f70726f6a6563743d434154266c696d69743d35222c2268223a7b22617574686f72697a6174696f6e223a22426561726572206375735f6578616d706c65227d7d",
+      "envelope": "01011f112aa78ba5eef700000199c82cc001020202020202020202020202d4a129a828762626f6084b30850b48425df95efbb56e4e26e2bfa704cd36c3f885f46ebcadd4b41737e2e8da1a85d3dcbc40ec9c95c9569157355893cb0e987fd480f063ad72e6a7b1a29ab7317f2a254a7c954c43caf24b48b6dad591a51053ab70032a32b9d269e21e65e023a01c"
+    },
+    {
+      "name": "unicode body",
+      "kid": "1f112aa78ba5eef7",
+      "ts_ms": 1760000000002,
+      "nonce": "030303030303030303030303",
+      "meta_json": "{\"m\":\"PATCH\",\"p\":\"/api/tasks/CAT-101\",\"h\":{\"authorization\":\"Bearer cus_example\",\"content-type\":\"application/json\"}}",
+      "body": "7b227469746c65223a20224772c3bcc39f6520f09f8cb8227d",
+      "plaintext": "000000737b226d223a225041544348222c2270223a222f6170692f7461736b732f4341542d313031222c2268223a7b22617574686f72697a6174696f6e223a22426561726572206375735f6578616d706c65222c22636f6e74656e742d74797065223a226170706c69636174696f6e2f6a736f6e227d7d7b227469746c65223a20224772c3bcc39f6520f09f8cb8227d",
+      "envelope": "01011f112aa78ba5eef700000199c82cc00203030303030303030303030327638069e232fb2629f855644906e22a1fc52e69e67687a23f1bc90b6bfd325621e30901793ea209c67e34feae298932d35aaf8a37010ed077c3569f1bb0d50be34e1e8f602ff4df338f5ebc36b3ecbe339b5d85da122d7dd1e6642965988510397bab162fefc213d4b64c4e255a657241036c480160c4fed4ccb8a347f4116763523f7beac2e2d65a3cabbc610ed6d63181bc9a317e41e475683d84a7f7c104"
+    }
+  ],
+  "responses": [
+    {
+      "name": "ok with cookies",
+      "kid": "1f112aa78ba5eef7",
+      "ts_ms": 1760000000050,
+      "nonce": "a0a0a0a0a0a0a0a0a0a0a0a0",
+      "request_nonce": "010101010101010101010101",
+      "meta_json": "{\"s\":200,\"h\":{\"content-type\":\"application/json\",\"set-cookie\":[\"catelier_device=abc; Path=/api/auth\"]}}",
+      "body": "7b22746f6b656e223a226375735f6578616d706c65227d",
+      "plaintext": "000000667b2273223a3230302c2268223a7b22636f6e74656e742d74797065223a226170706c69636174696f6e2f6a736f6e222c227365742d636f6f6b6965223a5b22636174656c6965725f6465766963653d6162633b20506174683d2f6170692f61757468225d7d7d7b22746f6b656e223a226375735f6578616d706c65227d",
+      "envelope": "01021f112aa78ba5eef700000199c82cc032a0a0a0a0a0a0a0a0a0a0a0a0ab1b42b3e490116b8f73f0192938e81cf682ca0e5cf007252310a679b86dc532fcb1a33d117fa0f4175efe5a7431d4b313e12e8ded97d27ce851d831c0872a3823db4233a5cb6dc59b3486b1ebad1017d7cfc8225b1316553f4194eb0c03442bbf5035b54c11c0d8fc75874bc6ce2987f2e64757b561abbc00c4618ab09ba659efbb1e1b3d4ac2e4784ee0569110332052"
+    },
+    {
+      "name": "not found, old key",
+      "kid": "1f112aa78ba5eef7",
+      "ts_ms": 1760000000051,
+      "nonce": "a1a1a1a1a1a1a1a1a1a1a1a1",
+      "request_nonce": "020202020202020202020202",
+      "meta_json": "{\"s\":404,\"h\":{\"content-type\":\"application/json\"},\"rotate\":true}",
+      "body": "7b2264657461696c223a224e6f7420666f756e64227d",
+      "plaintext": "0000003f7b2273223a3430342c2268223a7b22636f6e74656e742d74797065223a226170706c69636174696f6e2f6a736f6e227d2c22726f74617465223a747275657d7b2264657461696c223a224e6f7420666f756e64227d",
+      "envelope": "01021f112aa78ba5eef700000199c82cc033a1a1a1a1a1a1a1a1a1a1a1a13427868b937a189cea1e5894d2b76a6f88ff29fb788b4d440bb15ee5e4296c82b4239793510d0bcfe76b4c84718e522e21dbd221fd3a8b556cccd2026f41612fc88f4181fafd0d5cf5122d61d5260896111db9b55d93964e4dd0aba3ec11334ce487ac621b85c920d5"
+    },
+    {
+      "name": "empty",
+      "kid": "1f112aa78ba5eef7",
+      "ts_ms": 1760000000052,
+      "nonce": "a2a2a2a2a2a2a2a2a2a2a2a2",
+      "request_nonce": "030303030303030303030303",
+      "meta_json": "{\"s\":204,\"h\":{}}",
+      "body": "",
+      "plaintext": "000000107b2273223a3230342c2268223a7b7d7d",
+      "envelope": "01021f112aa78ba5eef700000199c82cc034a2a2a2a2a2a2a2a2a2a2a2a2a25b918c67d8bdc64f8c093adbdc6126dc97fe23e174c42b5cc264dadfb608d007dfaa6f"
+    }
+  ],
+  "ws": {
+    "key": "cek1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "cn": "000102030405060708090a0b0c0d0e0f",
+    "sn": "101112131415161718191a1b1c1d1e1f",
+    "cn_b64": "AAECAwQFBgcICQoLDA0ODw==",
+    "sn_b64": "EBESExQVFhcYGRobHB0eHw==",
+    "ws_key": "40278b0bf8c951e222f35b7d0efe89f37993d014a8ef2441d06667069ae7f820",
+    "frames": [
+      {
+        "direction": 1,
+        "counter": 0,
+        "type": 1,
+        "data": "7b2274223a2269222c2264223a226c735c72227d",
+        "frame": "01000000000000000048cc58683ef4aac1096d3d9e85e1f207a013c9a6fbce1fd3f1350faadaba49c4948efa2b"
+      },
+      {
+        "direction": 2,
+        "counter": 0,
+        "type": 1,
+        "data": "7b2274223a227265616479222c22726561646f6e6c79223a66616c73657d",
+        "frame": "010000000000000000a146fc0b411deb3aa144a1a254797f9fa6b77d09ad03ee872ecbe17cafaae0202c34d60c1c4f0b0986b7db3bfbd3"
+      },
+      {
+        "direction": 2,
+        "counter": 1,
+        "type": 2,
+        "data": "1b5b33326d6f6b1b5b306d0d0a",
+        "frame": "020000000000000001e660bcee3c55d043735ccd6bc82b736116781e67b49d16629dd7fd17a6"
+      },
+      {
+        "direction": 1,
+        "counter": 1,
+        "type": 1,
+        "data": "7b2274223a2272222c2263223a39302c2272223a32357d",
+        "frame": "010000000000000001ccfeb5b85cd7351389f2bf27050b769b306a3967f7ec9aaec9eb80c1d0d4e3175f223e89d735b2"
+      }
+    ]
+  },
+  "invalid": [
+    {
+      "name": "tag changed",
+      "envelope": "01011f112aa78ba5eef700000199c82cc001020202020202020202020202d4a129a828762626f6084b30850b48425df95efbb56e4e26e2bfa704cd36c3f885f46ebcadd4b41737e2e8da1a85d3dcbc40ec9c95c9569157355893cb0e987fd480f063ad72e6a7b1a29ab7317f2a254a7c954c43caf24b48b6dad591a51053ab70032a32b9d269e21e65e023a01d",
+      "error": "bad_envelope"
+    },
+    {
+      "name": "time changed (it is in the AAD)",
+      "envelope": "01011f112aa78ba5eef700000199c82cc000020202020202020202020202d4a129a828762626f6084b30850b48425df95efbb56e4e26e2bfa704cd36c3f885f46ebcadd4b41737e2e8da1a85d3dcbc40ec9c95c9569157355893cb0e987fd480f063ad72e6a7b1a29ab7317f2a254a7c954c43caf24b48b6dad591a51053ab70032a32b9d269e21e65e023a01c",
+      "error": "bad_envelope"
+    },
+    {
+      "name": "wrong direction",
+      "envelope": "01021f112aa78ba5eef700000199c82cc001020202020202020202020202d4a129a828762626f6084b30850b48425df95efbb56e4e26e2bfa704cd36c3f885f46ebcadd4b41737e2e8da1a85d3dcbc40ec9c95c9569157355893cb0e987fd480f063ad72e6a7b1a29ab7317f2a254a7c954c43caf24b48b6dad591a51053ab70032a32b9d269e21e65e023a01c",
+      "error": "bad_envelope"
+    },
+    {
+      "name": "unknown kid",
+      "envelope": "0101717350049d01d7e600000199c82cc00009090909090909090909090963b4aa3676e1c029eecff3e270ec3d9f6f427ca3c50028d5f627f3ed0c425d166cd64d1d88655a",
+      "error": "unknown_kid"
+    },
+    {
+      "name": "too short",
+      "envelope": "01011f112aa78ba5eef700000199c82cc001020202020202020202020202d4a129a828762626f6084b30850b48",
+      "error": "bad_envelope"
+    }
+  ]
+}
