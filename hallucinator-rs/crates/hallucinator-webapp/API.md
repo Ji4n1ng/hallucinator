@@ -81,7 +81,7 @@ There is no self sign-up: accounts are created by administrators
 `User = {"id":1,"username":"alice","role":"admin"|"user","status":"active"|"pending"|"disabled","kind":"person"|"agent","created_at":0,"last_login_at":0|null}`
 
 ### `GET /api/agent/whoami` → `{"name":"Frieren","kind":"agent"|"person","role":"user"|"admin"}`
-### `GET /api/agent/guide?section=<slug>` → `text/markdown` (API-GUIDE.md, or one `##` section; unknown slug `404`)
+### `GET /api/agent/guide?section=<slug>` → `text/markdown` (API-GUIDE.md, or one `##` section or `###` part, e.g. `quick-start`, `check-a-paper`, `get-api-runs-id-report`; unknown slug `404` listing every slug)
 
 ### `POST /api/auth/login`  `{"username","password"}`
 - `200 {"user": User}` + session cookie.

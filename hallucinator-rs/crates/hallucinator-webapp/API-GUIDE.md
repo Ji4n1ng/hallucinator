@@ -5,26 +5,27 @@
 Hallucinator checks every reference of an academic paper against CrossRef,
 arXiv, DBLP, Semantic Scholar, OpenAlex, PubMed, ACL Anthology and offline
 indexes. It flags references that no database has (possible fabrications),
-whose authors, DOI or arXiv id do not match, or that were retracted.
+references whose authors, DOI or arXiv id do not match, and retracted papers.
 
 Call it with `taskctl tool hallucinator METHOD PATH [--json '{…}']`. Each call
-goes sealed through the end-to-end tunnel and carries your agent token, so you
-never handle a URL, key or token. Read one part of this guide with
+goes sealed through the end-to-end tunnel with your agent token. You never
+handle a URL, key or token. Read one part of this quick start with
 `taskctl tool hallucinator guide --section <slug>`: `check-access`,
-`check-a-paper`, `read-the-report`, `follow-ups`, `limits-and-rules`, or a
-reference part (`reference-service`, `reference-runs`, …).
+`check-a-paper`, `read-the-report`, `follow-ups`, `limits-and-rules`. The
+endpoint reference comes after it (`reference-runs`, …). A wrong slug lists
+every section.
 
-## Check access
+### Check access
 
 ```bash
 taskctl tool hallucinator whoami        # = GET /api/agent/whoami
 # {"name":"Frieren","kind":"agent","role":"user"}
 ```
 
-`401` means your token is missing, revoked or expired. Tell a person. Do not
-make a token yourself.
+`401` means your token is missing, revoked or expired. Tell your manager. Do
+not make a token yourself.
 
-## Check a paper
+### Check a paper
 
 1. Submit the files as JSON. Give each file as `text` (`.bib`, `.bbl`,
    `.xml`) or `base64` (`.pdf`, `.zip`, `.tar.gz`). Write the body to a file
@@ -39,28 +40,27 @@ make a token yourself.
                      "options": {"title": "paper v3"}}))
    EOF
    taskctl tool hallucinator POST /api/runs --data-file run.json
-   # {"run_id":"9f2c…","links":{"report":"/api/runs/9f2c…/report",…}}
+   # 201 {"run_id":"9f2c…","links":{"report":"/api/runs/9f2c…/report",…}}
    ```
 
-   For references you only have as text, write them as BibTeX first (one
-   `.bib` file is enough). For the user's own paper, send the PDF with its
-   `.bib` of the same file stem: the PDF decides which references are cited
-   and the `.bib` gives clean fields.
+   A short `.bib` can go inline:
+   `taskctl tool hallucinator POST /api/runs --json '{"files":[{"name":"refs.bib","text":"@article{…}"}]}'`.
+   For references you only have as text, write them as BibTeX first. For the
+   user's own paper, send the PDF with its `.bib` of the same file stem: the
+   PDF decides which references are cited and the `.bib` gives clean fields.
 
-2. Wait for the compact report. `wait` blocks up to that many seconds until
-   the run is done. Keep it under `taskctl tool`'s read timeout (120 s;
-   raise it with `--timeout`):
+2. Wait for the run. `wait` blocks up to that many seconds until the run is
+   done. Keep it under the read timeout of `taskctl tool` (120 s; raise it
+   with `--timeout`):
 
    ```bash
    taskctl tool hallucinator GET '/api/runs/9f2c…/report?wait=100'
+   taskctl tool hallucinator GET '/api/runs/9f2c…/report?wait=540' --timeout 600
    ```
 
-   If `run.done` is `false`, call it again. Most references take seconds.
-   References that are not found can keep a run open for several minutes
-   while rate-limited databases back off (a 50-reference paper: under a
-   minute to about 7 minutes).
+   If `run.done` is `false`, call it again. `run.summary` tells the state.
 
-## Read the report
+### Read the report
 
 ```json
 {"run": {"id": "9f2c…", "status": "done", "done": true, "needs_attention": 2,
@@ -89,35 +89,43 @@ number in the paper.
 be verified", with the reason, and let a person decide. Never call a paper
 fabricated on this tool's word alone.
 
-## Follow-ups
+### Follow-ups
 
-Paper index `0` is the first paper of the run.
+`$T` is `taskctl tool hallucinator`. Paper index `0` is the first paper of
+the run.
 
 | Job | Call |
 |---|---|
-| Re-query the failed databases of not-found refs | `POST /api/runs/{id}/papers/0/retry --json '{"scope":"failed"}'`, then the report call again |
-| Re-check not-found refs / all problems / one ref | same, with `{"scope":"not_found"}` / `{"scope":"problems"}` / `{"scope":"ref","ref_idx":17}` |
-| Report as Markdown | `GET '/api/runs/{id}/export?format=markdown&problematic=1' -o report.md` |
-| Your past runs | `GET '/api/runs?limit=10'` |
-| Which databases are on, and how fresh | `GET /api/options`, `GET /api/databases` |
+| Re-query the databases that failed | `$T POST /api/runs/{id}/papers/0/retry --json '{"scope":"failed"}'`, then wait for the report again |
+| Re-check not-found refs, all problems, or one ref | the same call with `{"scope":"not_found"}`, `{"scope":"problems"}` or `{"scope":"ref","ref_idx":17}` |
+| Get the report as Markdown | `$T GET '/api/runs/{id}/export?format=markdown&problematic=1' -o report.md` |
+| List your past runs | `$T GET '/api/runs?limit=10'` |
+| Stop a run | `$T POST /api/runs/{id}/cancel` |
+| Delete a run (ask first) | `$T DELETE /api/runs/{id}` |
+| See which databases are on, and how fresh | `$T GET /api/options`, `$T GET /api/databases` |
 
 A retry while the run is busy gets `409`. Give the user the run's page: the
 tool's web address + `run.web_path`.
 
-## Limits and rules
+### Limits and rules
 
 - An agent account may do what a `user` account does: submit papers, read
   and export its own runs, retry, cancel and delete them, mark a reference
   safe and set a paper's verdict. It may not manage accounts, tokens, keys,
-  databases or settings (`403`). It sees only its own runs.
+  databases or settings (`403`). It sees only its own runs (`404` for others).
 - Ask the user first before you mark a reference as a false positive
   (`PUT …/refs/{idx}/fp`): it also feeds the shared local corpus that later
   checks trust. Ask before `DELETE /api/runs/{id}`: it cannot be undone.
-- Uploads: at most 500 files per run, and one call through `taskctl tool`
-  holds at most 32 MB (base64 makes a PDF a third larger). `GET /api/options`
-  has the server's limit and the accepted file types.
-- Live event streams (`…/events`) do not work through the tunnel: poll the
-  report with `?wait=` instead.
+- Size: one `taskctl tool` call holds at most 32 MB, and base64 makes a PDF
+  a third larger. The server takes at most 200 MB and 500 files per run;
+  a larger body gets `413`. `GET /api/options` has the server's limit and the
+  accepted file types.
+- Time: most references take seconds. References that are not found can
+  keep a run open for several minutes while rate-limited databases back off
+  (a 50-reference paper: under a minute to about 7 minutes). The server runs
+  2 checks at a time; others wait with `status` `queued`.
+- `?wait=` blocks at most 600 s. Live event streams (`…/events`) do not
+  work through the tunnel (`406`): poll the report with `?wait=` instead.
 - Every call by an agent is in the audit log, with the account, method,
   path, status and address.
 - Errors are JSON `{"error": "…"}`: `400` bad input · `401` bad or no token
@@ -172,13 +180,17 @@ too large; `429` `blocked` (too many envelopes from this address failed).
 ### GET /api/agent/guide
 
 This guide as `text/markdown`. Any account. `?section=<slug>` returns one
-`##` section (slugs: lowercase heading, other characters as `-`).
+`##` section, or one `###` part of a section (slugs: lowercase heading,
+other characters as `-`). `quick-start` is the whole quick start;
+`check-a-paper` is one part of it; `get-api-runs-id-report` is one endpoint.
 
 ```bash
-$T GET '/api/agent/guide?section=check-a-paper'
+$T GET '/api/agent/guide?section=quick-start'
+taskctl tool hallucinator guide --section check-a-paper
 ```
 
-Errors: `404` unknown section (the message lists the slugs).
+Errors: `404` unknown section (the message lists every slug, with the parts
+of each section in brackets).
 
 ### GET /api/agent/whoami
 

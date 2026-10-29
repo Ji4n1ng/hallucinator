@@ -259,7 +259,40 @@ async fn guide_whoami_and_health() {
         .await;
     assert_eq!(s, StatusCode::OK);
     let text = String::from_utf8_lossy(&b);
-    assert!(text.starts_with("## Check access") && !text.contains("## Check a paper"));
+    assert!(text.starts_with("### Check access") && !text.contains("### Check a paper"));
+
+    // The quick start is one section with all its parts; an endpoint is a
+    // part of its reference section.
+    let (s, _, b) = h
+        .send(request(
+            Method::GET,
+            "/api/agent/guide?section=quick-start",
+            Some(&t),
+            None,
+        ))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let text = String::from_utf8_lossy(&b);
+    assert!(text.starts_with("## Quick start"));
+    for part in [
+        "### Check access",
+        "### Check a paper",
+        "### Limits and rules",
+    ] {
+        assert!(text.contains(part), "quick-start lacks {part}");
+    }
+    assert!(!text.contains("## Endpoint reference"));
+    let (s, _, b) = h
+        .send(request(
+            Method::GET,
+            "/api/agent/guide?section=get-api-runs-id-report",
+            Some(&t),
+            None,
+        ))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let text = String::from_utf8_lossy(&b);
+    assert!(text.starts_with("### GET /api/runs/{id}/report") && !text.contains("### POST"));
 
     let (s, _, b) = h
         .send(request(
@@ -274,7 +307,7 @@ async fn guide_whoami_and_health() {
         json_of(&b)["error"]
             .as_str()
             .unwrap()
-            .contains("quick-start")
+            .contains("quick-start [check-access, check-a-paper,")
     );
 
     // The guide and whoami need an account.
@@ -598,7 +631,8 @@ async fn e2e_refuses_plain_and_serves_sealed() {
     )
     .await;
     assert_eq!(r.status, 200);
-    assert!(String::from_utf8_lossy(&r.body).starts_with("## Quick start"));
+    let text = String::from_utf8_lossy(&r.body);
+    assert!(text.starts_with("## Quick start") && text.contains("### Read the report"));
     // Without a token the guide is a sealed 401, not a plain one.
     let r = sealed_call(&h, &key, json!({"m": "GET", "p": "/api/agent/guide"}), b"").await;
     assert_eq!(r.status, 401);

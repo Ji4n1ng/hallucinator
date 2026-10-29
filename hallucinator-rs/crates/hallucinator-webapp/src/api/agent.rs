@@ -40,13 +40,29 @@ pub async fn guide(_user: AuthUser, Query(q): Query<GuideQuery>) -> ApiResult<Re
         return Ok(markdown(GUIDE.to_string()));
     };
     let sections = sections(GUIDE);
-    match sections.iter().find(|(slug, _)| slug == wanted) {
-        Some((_, text)) => Ok(markdown(text.to_string())),
-        None => Err(ApiError::not_found(format!(
-            "No section '{wanted}'. Sections: {}.",
+    let found = sections
+        .iter()
+        .find(|s| s.slug == wanted)
+        .map(|s| s.text)
+        .or_else(|| {
             sections
                 .iter()
-                .map(|(s, _)| s.as_str())
+                .flat_map(|s| &s.parts)
+                .find(|(slug, _)| slug == wanted)
+                .map(|(_, text)| *text)
+        });
+    match found {
+        Some(text) => Ok(markdown(text.to_string())),
+        None => Err(ApiError::not_found(format!(
+            "No section '{wanted}'. Sections, with their parts in brackets: {}.",
+            sections
+                .iter()
+                .map(|s| if s.parts.is_empty() {
+                    s.slug.clone()
+                } else {
+                    let parts: Vec<_> = s.parts.iter().map(|(p, _)| p.as_str()).collect();
+                    format!("{} [{}]", s.slug, parts.join(", "))
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
@@ -66,28 +82,50 @@ pub fn slug(heading: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Each `## ` section of a Markdown text, with its slug. A section runs to
-/// the next `## ` heading; `#` lines inside code fences do not count.
-pub fn sections(text: &str) -> Vec<(String, &str)> {
-    let mut starts: Vec<(usize, String)> = Vec::new();
+/// One `## ` section of a Markdown text, with its `### ` parts.
+pub struct Section<'a> {
+    pub slug: String,
+    pub text: &'a str,
+    /// `(slug, text)` of each `### ` part.
+    pub parts: Vec<(String, &'a str)>,
+}
+
+/// Each `## ` section of a Markdown text. A section runs to the next `## `
+/// heading, a part to the next `## ` or `### ` heading; `#` lines inside
+/// code fences do not count.
+pub fn sections(text: &str) -> Vec<Section<'_>> {
+    // (start, level, slug) of each heading.
+    let mut heads: Vec<(usize, usize, String)> = Vec::new();
     let mut fenced = false;
     let mut at = 0;
     for line in text.split_inclusive('\n') {
         if line.trim_start().starts_with("```") {
             fenced = !fenced;
         } else if !fenced && let Some(h) = line.strip_prefix("## ") {
-            starts.push((at, slug(h)));
+            heads.push((at, 2, slug(h)));
+        } else if !fenced && let Some(h) = line.strip_prefix("### ") {
+            heads.push((at, 3, slug(h)));
         }
         at += line.len();
     }
-    starts
-        .iter()
-        .enumerate()
-        .map(|(i, (start, slug))| {
-            let end = starts.get(i + 1).map_or(text.len(), |(s, _)| *s);
-            (slug.clone(), text[*start..end].trim_end())
-        })
-        .collect()
+    let mut out: Vec<Section> = Vec::new();
+    for (i, (start, level, slug)) in heads.iter().enumerate() {
+        let end = heads[i + 1..]
+            .iter()
+            .find(|(_, l, _)| l <= level)
+            .map_or(text.len(), |(s, _, _)| *s);
+        let body = text[*start..end].trim_end();
+        if *level == 2 {
+            out.push(Section {
+                slug: slug.clone(),
+                text: body,
+                parts: Vec::new(),
+            });
+        } else if let Some(section) = out.last_mut() {
+            section.parts.push((slug.clone(), body));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -98,31 +136,66 @@ mod tests {
     fn slugs_and_sections() {
         assert_eq!(slug("Quick start"), "quick-start");
         assert_eq!(slug("Reference: runs & results "), "reference-runs-results");
-        let text = "# T\nintro\n## One\na\n```\n## not a heading\n```\n## Two: b\nc\n";
+        assert_eq!(slug("GET /api/runs/{id}/report"), "get-api-runs-id-report");
+        let text =
+            "# T\nintro\n## One\na\n```\n## not a heading\n```\n### P\np\n### Q\nq\n## Two: b\nc\n";
         let s = sections(text);
         assert_eq!(
-            s.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            s.iter().map(|s| s.slug.as_str()).collect::<Vec<_>>(),
             ["one", "two-b"]
         );
-        assert!(s[0].1.starts_with("## One") && s[0].1.contains("## not a heading"));
-        assert_eq!(s[1].1, "## Two: b\nc");
+        assert!(s[0].text.starts_with("## One") && s[0].text.contains("## not a heading"));
+        assert!(s[0].text.ends_with("### Q\nq"));
+        assert_eq!(
+            s[0].parts,
+            [("p".into(), "### P\np"), ("q".into(), "### Q\nq")]
+        );
+        assert_eq!(s[1].text, "## Two: b\nc");
+        assert!(s[1].parts.is_empty());
     }
 
     #[test]
     fn guide_starts_with_a_short_quick_start() {
         let s = sections(GUIDE);
+        let quick = &s[0];
         assert_eq!(
-            s[0].0, "quick-start",
+            quick.slug, "quick-start",
             "the guide must open with ## Quick start"
         );
-        // Everything before the endpoint reference is the quick start.
-        let reference = GUIDE
-            .find("\n## Endpoint reference")
-            .expect("## Endpoint reference section");
-        let lines = GUIDE[..reference].lines().count();
-        assert!(
-            lines <= 150,
-            "the quick start part has {lines} lines (max 150)"
+        let lines = quick.text.lines().count();
+        assert!(lines <= 150, "the quick start has {lines} lines (max 150)");
+        assert_eq!(
+            quick
+                .parts
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "check-access",
+                "check-a-paper",
+                "read-the-report",
+                "follow-ups",
+                "limits-and-rules"
+            ]
         );
+        for call in [
+            "taskctl tool hallucinator whoami",
+            "taskctl tool hallucinator POST /api/runs",
+            "/report?wait=",
+        ] {
+            assert!(quick.text.contains(call), "the quick start lacks `{call}`");
+        }
+        assert_eq!(s[1].slug, "endpoint-reference");
+    }
+
+    #[test]
+    fn guide_slugs_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for s in sections(GUIDE) {
+            assert!(seen.insert(s.slug.clone()), "two sections are '{}'", s.slug);
+            for (p, _) in s.parts {
+                assert!(seen.insert(p.clone()), "two sections are '{p}'");
+            }
+        }
     }
 }
