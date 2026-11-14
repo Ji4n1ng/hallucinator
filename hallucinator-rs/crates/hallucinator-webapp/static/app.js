@@ -21,7 +21,14 @@
 
   const BOOL_PROPS = new Set(["checked", "disabled", "selected", "hidden", "multiple", "required", "readOnly", "open"]);
 
-  /** Create an element. attrs: class, dataset, style (object), on<Event> (fn), props, plain attrs. */
+  let uidSeq = 0;
+  /** A document-unique id for linking labels, hints and errors. */
+  const uid = (prefix) => `${prefix || "id"}-${++uidSeq}`;
+
+  const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /** Create an element. attrs: class, dataset, style (object), on<Event> (fn), props, plain attrs.
+   *  A <label> that wraps its control also gets `for`, so voice control finds it. */
   function h(tag, attrs, ...children) {
     const el = document.createElement(tag);
     if (attrs) {
@@ -39,7 +46,53 @@
       }
     }
     append(el, children);
+    if (tag === "label" && !el.htmlFor) {
+      const control = el.querySelector("input, select, textarea");
+      if (control) {
+        if (!control.id) control.id = uid("f");
+        el.htmlFor = control.id;
+      }
+    }
     return el;
+  }
+
+  /** A form field whose hint sits outside the label and is linked with aria-describedby. */
+  function field(labelContent, control, hint) {
+    if (!control.id) control.id = uid("f");
+    let hintEl = null;
+    if (hint) {
+      hintEl = h("small", { class: "field-hint", id: uid("hint") }, hint);
+      control.setAttribute("aria-describedby", hintEl.id);
+    }
+    return h("div", { class: "field" }, h("label", { for: control.id }, labelContent), control, hintEl);
+  }
+
+  function describedBy(control, id, on) {
+    const ids = (control.getAttribute("aria-describedby") || "").split(/\s+/).filter((x) => x && x !== id);
+    if (on) ids.push(id);
+    if (ids.length) control.setAttribute("aria-describedby", ids.join(" "));
+    else control.removeAttribute("aria-describedby");
+  }
+
+  /** Show a form error (errEl is a role="alert" paragraph). With a control: mark it
+   *  invalid, link the message to it and move focus there. */
+  function setFieldError(errEl, msg, control) {
+    errEl.textContent = msg;
+    errEl.classList.remove("hidden");
+    if (!control) return;
+    if (!errEl.id) errEl.id = uid("err");
+    control.setAttribute("aria-invalid", "true");
+    describedBy(control, errEl.id, true);
+    control.addEventListener("input", () => control.removeAttribute("aria-invalid"), { once: true });
+    control.focus();
+  }
+
+  function clearFieldErrors(errEl, controls) {
+    errEl.classList.add("hidden");
+    for (const c of controls || []) {
+      c.removeAttribute("aria-invalid");
+      if (errEl.id) describedBy(c, errEl.id, false);
+    }
   }
 
   function append(el, ...children) {
@@ -280,15 +333,68 @@
   // 3. UI primitives
   // ════════════════════════════════════════════════════════════════════
 
+  // The one toast region (#toasts). A modal <dialog> makes the rest of the
+  // page inert and paints above it, so while one is open the region moves
+  // into the topmost open dialog and back out when it closes.
+  let toastBox = null;
+  const modalLayer = []; // open modal <dialog>s, topmost last
+
+  function toastRegion() {
+    if (!toastBox) toastBox = $("#toasts");
+    return toastBox;
+  }
+
+  function placeToasts() {
+    const box = toastRegion();
+    if (!box) return;
+    const host = modalLayer.length ? modalLayer[modalLayer.length - 1] : document.body;
+    if (box.parentNode !== host) host.appendChild(box);
+  }
+
   function toast(message, kind, timeout) {
-    const box = $("#toasts");
+    const box = toastRegion();
     const t = h("div", { class: "toast" + (kind ? " " + kind : ""), role: kind === "error" ? "alert" : "status" },
       h("span", { class: "grow break" }, message),
-      h("button", { class: "t-close", type: "button", "aria-label": "Dismiss", onclick: () => t.remove() }, "×"));
+      h("button", { class: "t-close", type: "button", "aria-label": "Dismiss", onclick: () => t.remove() }, h("span", { "aria-hidden": "true" }, "×")));
     box.appendChild(t);
     const ms = timeout != null ? timeout : (kind === "error" ? 8000 : 4000);
-    if (ms > 0) setTimeout(() => t.remove(), ms);
+    if (ms > 0) {
+      // Do not pull a toast away while the keyboard is on its Dismiss button.
+      const expire = () => { if (t.contains(document.activeElement)) setTimeout(expire, 1000); else t.remove(); };
+      setTimeout(expire, ms);
+    }
     return t;
+  }
+
+  /** Open a <dialog> as a modal: native focus containment, inert page, Esc.
+   *  Light dismiss comes from closedby="any"; where a browser lacks it
+   *  (Safari), a press and release on the backdrop closes the dialog. */
+  function showModalDialog(dialog) {
+    $("#overlay-root").appendChild(dialog);
+    dialog.showModal();
+    modalLayer.push(dialog);
+    placeToasts();
+    if (!("closedBy" in HTMLDialogElement.prototype) && dialog.getAttribute("closedby") === "any") {
+      // Test the pointer position and the target: the dialog is also the target
+      // for its own padding, and toasts inside it sit outside its box.
+      const outside = (e) => {
+        if (e.target !== dialog) return false;
+        const r = dialog.getBoundingClientRect();
+        return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+      };
+      let pressedOutside = false;
+      dialog.addEventListener("pointerdown", (e) => { pressedOutside = outside(e); });
+      dialog.addEventListener("pointerup", (e) => { if (pressedOutside && outside(e)) dialog.close(); pressedOutside = false; });
+    }
+  }
+
+  /** Take a closed (or closing) dialog out of the layer and the DOM. */
+  function removeModalDialog(dialog) {
+    if (dialog.open) dialog.close();
+    const i = modalLayer.indexOf(dialog);
+    if (i >= 0) modalLayer.splice(i, 1);
+    placeToasts();
+    dialog.remove();
   }
 
   const overlayStack = [];
@@ -298,49 +404,43 @@
       .filter((el) => el.offsetParent !== null || el === document.activeElement);
   }
 
-  /** Generic modal. Returns { el, body, close }. */
-  function openModal({ title, body, actions, wide, onClose, label }) {
+  /** Generic modal on a native <dialog>. Returns { el, body, close }.
+   *  initialFocus: the control to focus first (default: first field, else
+   *  the first control that is not the close button). */
+  function openModal({ title, body, actions, wide, onClose, label, initialFocus }) {
     const prevFocus = document.activeElement;
-    const titleId = "m-" + Math.random().toString(36).slice(2);
-    const modal = h("div", { class: "modal" + (wide ? " wide" : ""), role: "dialog", "aria-modal": "true", "aria-labelledby": title ? titleId : null, "aria-label": title ? null : (label || "Dialog") });
-    const backdrop = h("div", { class: "modal-backdrop" }, modal);
+    const titleId = uid("m");
+    const modal = h("dialog", {
+      class: "modal" + (wide ? " wide" : ""), closedby: "any",
+      "aria-labelledby": title ? titleId : null, "aria-label": title ? null : (label || "Dialog"),
+    });
     let closed = false;
-    const entry = {
-      el: modal,
-      close() {
-        if (closed) return;
-        closed = true;
-        backdrop.remove();
-        const i = overlayStack.indexOf(entry);
-        if (i >= 0) overlayStack.splice(i, 1);
-        if (onClose) onClose();
-        if (prevFocus && prevFocus.focus && document.contains(prevFocus)) prevFocus.focus();
-      },
+    // Close synchronously: callers read the result right after close().
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      removeModalDialog(modal);
+      const i = overlayStack.indexOf(entry);
+      if (i >= 0) overlayStack.splice(i, 1);
+      if (onClose) onClose();
+      if (prevFocus && prevFocus.focus && document.contains(prevFocus)) prevFocus.focus();
     };
+    const entry = { el: modal, close: finish };
     if (title) modal.appendChild(h("div", { class: "row-between" }, h("h2", { id: titleId }, title),
-      h("button", { type: "button", class: "btn-icon", "aria-label": "Close", onclick: () => entry.close() }, "×")));
+      h("button", { type: "button", class: "btn-icon", "aria-label": "Close", onclick: finish }, h("span", { "aria-hidden": "true" }, "×"))));
     const bodyEl = h("div", { class: "stack" });
     if (body) append(bodyEl, [body]);
     modal.appendChild(bodyEl);
     entry.body = bodyEl;
     if (actions && actions.length) modal.appendChild(h("div", { class: "modal-actions" }, actions));
-    backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) entry.close(); });
-    modal.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") { e.stopPropagation(); entry.close(); }
-      if (e.key === "Tab") {
-        const f = focusables(modal);
-        if (!f.length) return;
-        const first = f[0];
-        const last = f[f.length - 1];
-        if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
-        else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
-      }
-    });
-    $("#overlay-root").appendChild(backdrop);
+    // Esc, light dismiss and the back gesture close the dialog natively.
+    modal.addEventListener("close", finish);
+    const f = Array.from(modal.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])"))
+      .filter((el) => !el.closest(".hidden"));
+    const target = initialFocus || f.find((el) => el.matches("input, select, textarea")) || f.find((el) => !el.classList.contains("btn-icon")) || f[0];
+    if (target) target.autofocus = true;
+    showModalDialog(modal);
     overlayStack.push(entry);
-    const f = focusables(modal);
-    const target = f.find((el) => el.matches("input, select, textarea")) || f.find((el) => !el.classList.contains("btn-icon")) || f[0];
-    if (target) setTimeout(() => target.focus(), 0);
     return entry;
   }
 
@@ -353,9 +453,10 @@
         title,
         body: typeof message === "string" ? h("p", { class: "muted" }, message) : message,
         actions: [cancel, ok],
+        // A destructive confirmation starts on the safe choice.
+        initialFocus: danger ? cancel : ok,
         onClose: () => resolve(result),
       });
-      setTimeout(() => ok.focus(), 0);
     });
   }
 
@@ -363,34 +464,62 @@
     while (overlayStack.length) overlayStack[overlayStack.length - 1].close();
   }
 
-  /** Dropdown: a trigger button + a floating menu container. Returns { root, menu, close }. */
+  /** Arrow keys, Home and End move focus through a menu's items. */
+  function menuKeys(e, items) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key) || !items.length) return;
+    const i = items.indexOf(document.activeElement);
+    let next;
+    if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = items.length - 1;
+    else next = (i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
+    if (e.key === "ArrowDown" && i < 0) next = 0;
+    items[next].focus();
+    e.preventDefault();
+  }
+
+  /** Dropdown: a trigger button + a floating container. Returns { root, menu, close }.
+   *  opts.panel: the container holds a small form (a disclosure, not a menu),
+   *  so it gets no menu roles or arrow keys. */
   function dropdown(triggerLabel, buildMenu, opts) {
     opts = opts || {};
-    const menu = h("div", { class: "menu hidden", role: "menu" });
+    const panel = !!opts.panel;
+    const menu = h("div", { class: "menu hidden", id: uid("dd"), role: panel ? null : "menu" });
     const trigger = h("button", {
       type: "button",
       class: opts.class || "btn btn-tertiary btn-sm",
-      "aria-haspopup": "menu",
+      "aria-haspopup": panel ? null : "menu",
       "aria-expanded": "false",
+      "aria-controls": menu.id,
       disabled: !!opts.disabled,
-    }, triggerLabel, " ▾");
+    }, triggerLabel, h("span", { "aria-hidden": "true" }, " ▾"));
+    if (!panel) {
+      trigger.id = uid("ddt");
+      menu.setAttribute("aria-labelledby", trigger.id);
+    }
     const root = h("div", { class: "dropdown" }, trigger, menu);
+    const items = () => focusables(menu);
     const onDoc = (e) => { if (!root.contains(e.target)) close(); };
     const onKey = (e) => { if (e.key === "Escape") { close(); trigger.focus(); } };
+    // Tab out of the container closes it, so focus never stays in hidden content.
+    root.addEventListener("focusout", (e) => { if (e.relatedTarget && !root.contains(e.relatedTarget)) close(); });
+    if (!panel) menu.addEventListener("keydown", (e) => menuKeys(e, items()));
     function open() {
       replace(menu, buildMenu(close));
       menu.classList.remove("hidden");
       trigger.setAttribute("aria-expanded", "true");
       document.addEventListener("mousedown", onDoc);
       document.addEventListener("keydown", onKey);
-      const first = focusables(menu)[0];
+      const first = items()[0];
       if (first) first.focus();
     }
     function close() {
+      if (menu.classList.contains("hidden")) return;
+      const hadFocus = menu.contains(document.activeElement);
       menu.classList.add("hidden");
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
+      if (hadFocus) trigger.focus();
     }
     trigger.addEventListener("click", () => (menu.classList.contains("hidden") ? open() : close()));
     if (opts.alignLeft) menu.style.left = "0";
@@ -416,9 +545,9 @@
     return h("div", { "aria-hidden": "true" }, out);
   }
 
-  function progressBar(fraction, cls) {
+  function progressBar(fraction, cls, label) {
     const pct = Math.max(0, Math.min(1, fraction || 0)) * 100;
-    return h("div", { class: "progress " + (cls || ""), role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(pct)) },
+    return h("div", { class: "progress " + (cls || ""), role: "progressbar", "aria-label": label || "Progress", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(pct)) },
       h("div", { class: "bar", style: { width: pct + "%" } }));
   }
 
@@ -450,7 +579,9 @@
   }
 
   function switchEl(label, opts) {
-    const input = h("input", { type: "checkbox", checked: !!opts.checked, disabled: !!opts.disabled, onchange: opts.onchange || null });
+    // role="switch" is what the switch guide's fallback gives a checkbox
+    // where <input type="checkbox" switch> is not supported.
+    const input = h("input", { type: "checkbox", role: "switch", checked: !!opts.checked, disabled: !!opts.disabled, onchange: opts.onchange || null });
     const el = h("label", { class: "switch" + (opts.disabled ? " disabled" : ""), title: opts.title || null }, input, h("span", { class: "track", "aria-hidden": "true" }), h("span", null, label));
     return { el, input };
   }
@@ -622,15 +753,17 @@
   }
 
   const ROUTES = [
-    { re: /^\/?$/, nav: "new", view: viewNew },
-    { re: /^\/runs\/([A-Za-z0-9_-]+)\/?$/, nav: "history", view: viewRun },
-    { re: /^\/history\/?$/, nav: "history", view: viewHistory },
-    { re: /^\/databases\/?$/, nav: "databases", view: viewDatabases },
-    { re: /^\/admin\/?$/, nav: "admin", view: viewAdmin },
-    { re: /^\/account\/?$/, nav: "account", view: viewAccount },
+    { re: /^\/?$/, nav: "new", title: "New check", view: viewNew },
+    { re: /^\/runs\/([A-Za-z0-9_-]+)\/?$/, nav: "history", title: "Run", view: viewRun },
+    { re: /^\/history\/?$/, nav: "history", title: "History", view: viewHistory },
+    { re: /^\/databases\/?$/, nav: "databases", title: "Databases", view: viewDatabases },
+    { re: /^\/admin\/?$/, nav: "admin", title: "Admin", view: viewAdmin },
+    { re: /^\/account\/?$/, nav: "account", title: "Account", view: viewAccount },
   ];
 
-  function route() {
+  /** Render the view for location.hash. `moveFocus` (a hashchange event, or
+   *  true): the user navigated, so the reading position moves to the new view. */
+  function route(moveFocus) {
     if (currentCtx) {
       for (const fn of currentCtx.cleanups) { try { fn(); } catch (_) { /* ignore */ } }
     }
@@ -654,6 +787,9 @@
       if (matched && a.dataset.route === matched.nav) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
+    document.title = `${matched ? matched.title : "Page not found"} · Hallucinator`;
+    window.scrollTo(0, 0);
+    if (moveFocus) root.focus();
     if (!matched) {
       root.appendChild(h("div", { class: "container page" }, emptyState("Page not found", "That page does not exist.", h("a", { class: "btn btn-primary", href: "#/" }, "New check"))));
       root.setAttribute("aria-busy", "false");
@@ -667,7 +803,6 @@
         root.appendChild(h("div", { class: "container page" }, emptyState("Something went wrong", (e && e.message) || String(e))));
       })
       .finally(() => { if (ctx.alive()) root.setAttribute("aria-busy", "false"); });
-    window.scrollTo(0, 0);
   }
 
   function closeMobileNav() {
@@ -706,18 +841,23 @@
     });
     menu.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { closeUserMenu(); pill.focus(); }
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        const items = focusables(menu);
-        const i = items.indexOf(document.activeElement);
-        const next = items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length];
-        if (next) next.focus();
-        e.preventDefault();
-      }
+      menuKeys(e, focusables(menu));
+    });
+    // Tab out of the menu closes it, so focus never stays in hidden content.
+    $(".nav-right").addEventListener("focusout", (e) => {
+      if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) closeUserMenu();
     });
     menu.addEventListener("click", (e) => { if (e.target.closest("a")) closeUserMenu(); });
     $("#btn-signout").addEventListener("click", async () => {
       try { await api("POST", "/api/auth/logout"); } catch (_) { /* ignore */ }
       location.href = "/login";
+    });
+
+    // The router owns location.hash, so "#app" would open a not-found view:
+    // the skip link moves focus itself.
+    $(".skip-link").addEventListener("click", (e) => {
+      e.preventDefault();
+      $("#app").focus();
     });
 
     const toggle = $("#nav-toggle");
@@ -745,7 +885,7 @@
     S.csrf = me.csrf;
     setupShell();
     window.addEventListener("hashchange", route);
-    route();
+    route(false);
   }
 
   // ════════════════════════════════════════════════════════════════════
@@ -786,11 +926,15 @@
       uploading: false,
     };
 
-    const fileInput = h("input", { type: "file", multiple: true, class: "sr-only", tabindex: "-1", "aria-hidden": "true" });
-    const dz = h("div", { class: "dropzone", role: "button", tabindex: "0", "aria-label": "Choose files to check, or drop them here" },
-      h("div", { class: "dz-icon", "aria-hidden": "true" }, "↑"),
-      h("div", { class: "dz-title" }, "Drop papers here or click to browse"),
-      h("p", { class: "caption mt-sm", id: "dz-accept" }, "PDF, BibTeX (.bib), .bbl, GROBID .xml, or a .zip / .tar.gz archive of them"));
+    // The drop zone is a native <button>: Enter and Space open the file
+    // picker without key handlers. The file input stays out of the tab order
+    // (visually hidden, not display:none, so .click() works everywhere).
+    const dzTitleId = uid("dz-title");
+    const fileInput = h("input", { type: "file", multiple: true, class: "sr-only", tabindex: "-1", "aria-labelledby": dzTitleId });
+    const dz = h("button", { type: "button", class: "dropzone", "aria-labelledby": dzTitleId, "aria-describedby": "dz-accept" },
+      h("span", { class: "dz-icon", "aria-hidden": "true" }, "↑"),
+      h("span", { class: "dz-title", id: dzTitleId }, "Drop papers here or click to browse"),
+      h("span", { class: "caption mt-sm", id: "dz-accept" }, "PDF, BibTeX (.bib), .bbl, GROBID .xml, or a .zip / .tar.gz archive of them"));
     const fileListEl = h("ul", { class: "file-list", "aria-label": "Selected files" });
     const pairingEl = h("div", { class: "mt-md" });
     const optionsEl = h("div", { class: "stack" }, skeleton(1));
@@ -816,18 +960,22 @@
       form,
       h("section", { class: "section" },
         h("div", { class: "product-grid" },
-          productCard("pc-coral", "Check", "Every citation", "Upload PDFs or bibliographies; results stream in live.", "#/", () => { dz.focus(); dz.scrollIntoView({ behavior: "smooth", block: "center" }); }),
+          productCard("pc-coral", "Check", "Every citation", "Upload PDFs or bibliographies; results stream in live.", "#/", focusDropzone),
           productCard("pc-magenta", "History", "Every run, kept", "Re-open past checks, mark false positives, export reports.", "#/history"),
           productCard("pc-blue", "Databases", "Offline indexes", "See how fresh DBLP, arXiv, ACL and the local corpus are.", "#/databases"),
-          productCard("pc-purple", "BibTeX", ".bib support", "Pair a PDF with its .bib to recover titles, DOIs and URLs the PDF parser misses.", "#/", () => { dz.focus(); dz.scrollIntoView({ behavior: "smooth", block: "center" }); }))),
+          productCard("pc-purple", "BibTeX", ".bib support", "Pair a PDF with its .bib to recover titles, DOIs and URLs the PDF parser misses.", "#/", focusDropzone))),
       h("section", { class: "section" },
         h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Recent runs"), h("a", { class: "btn-link", href: "#/history" }, "View all →")),
         recentEl));
     root.appendChild(page);
 
+    function focusDropzone() {
+      dz.focus({ preventScroll: true });
+      dz.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "center" });
+    }
+
     // ── file handling ────────────────────────────────────────────────
     dz.addEventListener("click", () => fileInput.click());
-    dz.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); } });
     fileInput.addEventListener("change", () => { addFiles(Array.from(fileInput.files || [])); fileInput.value = ""; });
     ["dragenter", "dragover"].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add("drag"); }));
     ["dragleave", "dragend"].forEach((ev) => dz.addEventListener(ev, () => dz.classList.remove("drag")));
@@ -884,7 +1032,7 @@
       // pairing / bib_mode panel
       clear(pairingEl);
       if (pairOf.size) {
-        const seg = h("div", { class: "pill-tabs", role: "radiogroup", "aria-label": "How to use the paired .bib/.bbl" },
+        const seg = h("div", { class: "pill-tabs", role: "group", "aria-label": "How to use the paired .bib/.bbl" },
           modePill("merge", "Merge into the PDF (recommended)"),
           modePill("separate", "Check each file separately"));
         pairingEl.appendChild(h("div", { class: "info-box stack" },
@@ -903,7 +1051,7 @@
 
     function modePill(mode, label) {
       return h("button", {
-        type: "button", class: "pill-tab", role: "radio", "aria-checked": String(st.bibMode === mode), "aria-pressed": String(st.bibMode === mode),
+        type: "button", class: "pill-tab", "aria-pressed": String(st.bibMode === mode),
         onclick: () => { st.bibMode = mode; renderFiles(); },
       }, label);
     }
@@ -979,7 +1127,7 @@
       submitBtn.disabled = true;
       submitBtn.textContent = "Uploading…";
       const pctText = h("span", { class: "caption" }, "Uploading… 0%");
-      const bar = progressBar(0, "lg");
+      const bar = progressBar(0, "lg", "Upload progress");
       replace(uploadProg, pctText, bar);
       uploadProg.classList.remove("hidden");
 
@@ -1042,9 +1190,15 @@
     const tbody = h("tbody");
     for (const r of runs) {
       const st = r.stats || {};
-      const go = () => { location.hash = "#/runs/" + encodeURIComponent(r.id); };
-      tbody.appendChild(h("tr", { class: "clickable", tabindex: "0", onclick: go, onkeydown: (e) => { if (e.key === "Enter") go(); } },
-        h("td", null, h("div", { class: "t-title" }, r.title || r.id), r.error ? h("div", { class: "t-sub" }, r.error) : null),
+      const href = "#/runs/" + encodeURIComponent(r.id);
+      // The title is the row's link (keyboard, middle click, copy link);
+      // a click elsewhere on the row follows it too.
+      const go = (e) => {
+        if (e.target.closest("a, button") || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        location.hash = href;
+      };
+      tbody.appendChild(h("tr", { class: "clickable", onclick: go },
+        h("td", null, h("a", { class: "row-link t-title", href }, r.title || r.id), r.error ? h("div", { class: "t-sub" }, r.error) : null),
         h("td", { class: "num" }, fmtNum(r.paper_count)),
         h("td", { class: "num nowrap" },
           h("span", { class: st.problems ? "text-bad" : "" }, fmtNum(st.problems || 0)),
@@ -1108,7 +1262,7 @@
     const runProgEl = h("div");
     const statsEl = h("div", { class: "mt-md" });
     const runBannerEl = h("div", { class: "stack mt-md" });
-    const papersEl = h("nav", { class: "run-papers", "aria-label": "Papers in this run" });
+    const papersEl = h("div", { class: "run-papers", role: "group", "aria-label": "Papers in this run" });
     const paperBarEl = h("div", { class: "paper-bar" });
     const bannersEl = h("div", { class: "stack", style: { marginBottom: "12px" } });
     const toolbarEl = h("div");
@@ -1367,10 +1521,10 @@
           if (exp.scope === "paper" && p) params.set("paper", String(p.idx));
           link.setAttribute("href", `${base}/export?${params.toString()}`);
         };
-        const fmtSel = h("select", { class: "input input-sm", "aria-label": "Format", onchange: (e) => { exp.format = e.target.value; update(); } },
+        const fmtSel = h("select", { class: "input input-sm", onchange: (e) => { exp.format = e.target.value; update(); } },
           [["json", "JSON (loadable by hallucinator-tui)"], ["csv", "CSV"], ["markdown", "Markdown"], ["text", "Plain text"], ["html", "HTML"]]
             .map(([v, l]) => h("option", { value: v, selected: v === exp.format }, l)));
-        const scopeSel = h("select", { class: "input input-sm", "aria-label": "Scope", onchange: (e) => { exp.scope = e.target.value; update(); } },
+        const scopeSel = h("select", { class: "input input-sm", onchange: (e) => { exp.scope = e.target.value; update(); } },
           h("option", { value: "run" }, "Whole run"),
           paper() ? h("option", { value: "paper" }, "Current paper only") : null);
         const prob = h("label", { class: "check" }, h("input", { type: "checkbox", onchange: (e) => { exp.problematic = e.target.checked; update(); } }), "Problems only");
@@ -1380,7 +1534,7 @@
           h("label", { class: "field" }, h("span", null, "Format"), fmtSel),
           h("label", { class: "field" }, h("span", null, "Scope"), scopeSel),
           prob, link);
-      });
+      }, { panel: true });
     }
 
     async function cancelRun() {
@@ -1463,7 +1617,7 @@
       ], { disabled: runActive() || p.status === "failed" });
       replace(paperBarEl,
         h("div", { class: "grow" },
-          h("div", { class: "paper-title" }, breakableName(p.filename)),
+          h("h2", { class: "paper-title" }, breakableName(p.filename)),
           h("div", { class: "row mt-sm" },
             kindBadge(p.input_kind),
             p.companion_filename ? h("span", { class: "caption" }, `with ${p.companion_filename}`) : null,
@@ -1543,7 +1697,7 @@
       clear(toolbarEl);
       rv.countEls = {};
       if (!p) return;
-      const pills = h("div", { class: "pill-tabs pill-tabs-sm", role: "toolbar", "aria-label": "Filter references" });
+      const pills = h("div", { class: "pill-tabs pill-tabs-sm", role: "group", "aria-label": "Filter references" });
       for (const f of REF_FILTERS) {
         const count = h("span", { class: "count" }, "0");
         rv.countEls[f.key] = count;
@@ -1557,13 +1711,13 @@
           },
         }, f.label, count));
       }
-      const search = h("input", { class: "search-pill", type: "search", placeholder: "Search title, author, citation…", "aria-label": "Search references", value: rv.q });
+      const search = h("input", { class: "search-pill", type: "search", placeholder: "Search title, author, citation…", "aria-label": "Search references", value: rv.q, autocorrect: "off", autocapitalize: "none", spellcheck: "false" });
       search.addEventListener("input", debounce(() => { rv.q = search.value; renderTable(); }, 150));
       const sortSel = h("select", { class: "search-pill", "aria-label": "Sort references", onchange: (e) => { rv.sort = e.target.value; runViewPrefs.sort = rv.sort; renderTable(); } },
         h("option", { value: "num", selected: rv.sort === "num" }, "Sort: number"),
         h("option", { value: "verdict", selected: rv.sort === "verdict" }, "Sort: verdict"));
       sortSel.style.flex = "0 0 auto";
-      append(toolbarEl, h("div", { class: "toolbar" }, pills), h("div", { class: "toolbar" }, search, sortSel));
+      append(toolbarEl, h("div", { class: "toolbar" }, pills), h("search", { class: "toolbar" }, search, sortSel));
     }
 
     function visibleRefs() {
@@ -1605,15 +1759,16 @@
         const authors = r.authors || [];
         const authorText = authors.length > 3 ? `${authors.slice(0, 3).join(", ")} et al.` : authors.join(", ");
         const sel = r.idx === rv.selRef;
+        // The title button is the row's control (Tab, Enter, Space); a click
+        // anywhere on the row selects it too. aria-current marks the selection.
         const row = h("tr", {
-          class: "clickable" + (sel ? " selected" : ""), tabindex: "0", dataset: { idx: String(r.idx) },
-          "aria-selected": String(sel),
-          onclick: () => selectRef(r.idx, true),
-          onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); selectRef(r.idx, true); } },
+          class: "clickable" + (sel ? " selected" : ""), dataset: { idx: String(r.idx) },
+          onclick: (e) => { if (!e.target.closest("a, button, select, input")) selectRef(r.idx, true); },
         },
           h("td", { class: "num stone" }, String(r.original_number)),
           h("td", null,
-            h("div", { class: "t-title" }, r.title || h("span", { class: "stone" }, truncate(r.raw_citation, 140) || "(no title)")),
+            h("button", { type: "button", class: "row-link t-title", "aria-current": sel ? "true" : null, onclick: () => selectRef(r.idx, true) },
+              r.title || h("span", { class: "stone" }, truncate(r.raw_citation, 140) || "(no title)")),
             authorText || (merged && r.origin) ? h("div", { class: "t-sub" },
               authorText,
               merged && r.origin ? h("span", null, authorText ? " · " : "", badge(r.origin.toUpperCase(), r.origin === "pdf" ? "badge-outline badge-sm" : "badge-code")) : null) : null),
@@ -1638,7 +1793,8 @@
       tableEl.querySelectorAll("tbody tr").forEach((tr) => {
         const on = Number(tr.dataset.idx) === idx;
         tr.classList.toggle("selected", on);
-        tr.setAttribute("aria-selected", String(on));
+        const b = tr.querySelector(".row-link");
+        if (b) { if (on) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current"); }
       });
       if (isNarrow()) {
         if (openIt) openDrawer(); else if (rv.drawer) renderDetailPanel();
@@ -1648,25 +1804,27 @@
     }
 
     // ── detail ───────────────────────────────────────────────────────
+    // On narrow screens the detail opens in a side drawer: a native modal
+    // <dialog> (focus stays inside, Esc and a tap outside close it).
     function openDrawer() {
       if (!rv.drawer) {
         const prevFocus = document.activeElement;
-        const panel = h("aside", { class: "drawer", role: "dialog", "aria-modal": "true", "aria-label": "Reference detail", tabindex: "-1" });
-        const backdrop = h("div", { class: "drawer-backdrop", onclick: closeDrawer });
-        panel.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closeDrawer(); } });
-        $("#overlay-root").append(backdrop, panel);
-        rv.drawer = { panel, backdrop, prevFocus };
+        const panel = h("dialog", { class: "drawer", "aria-label": "Reference detail", tabindex: "-1", closedby: "any" });
+        panel.addEventListener("close", () => { if (rv.drawer && rv.drawer.panel === panel) closeDrawer(); });
+        rv.drawer = { panel, prevFocus };
+        renderDetailPanel();
+        showModalDialog(panel);
+      } else {
+        renderDetailPanel();
       }
-      renderDetailPanel();
-      setTimeout(() => rv.drawer && rv.drawer.panel.focus(), 0);
+      rv.drawer.panel.focus();
     }
 
     function closeDrawer() {
       if (!rv.drawer) return;
-      const { panel, backdrop, prevFocus } = rv.drawer;
-      panel.remove();
-      backdrop.remove();
+      const { panel, prevFocus } = rv.drawer;
       rv.drawer = null;
+      removeModalDialog(panel);
       if (prevFocus && document.contains(prevFocus)) prevFocus.focus();
     }
 
@@ -1682,7 +1840,7 @@
         const scroll = target.scrollTop;
         clear(target);
         if (target === rv.drawer?.panel) {
-          target.appendChild(h("button", { type: "button", class: "btn-icon drawer-close", "aria-label": "Close detail", onclick: closeDrawer }, "×"));
+          target.appendChild(h("button", { type: "button", class: "btn-icon drawer-close", "aria-label": "Close detail", onclick: closeDrawer }, h("span", { "aria-hidden": "true" }, "×")));
         }
         if (!p || !r) {
           target.appendChild(h("div", { class: "detail-inner" },
@@ -1854,7 +2012,8 @@
         const next = e.key === "j" ? Math.min(refs.length - 1, pos + 1) : Math.max(0, pos < 0 ? 0 : pos - 1);
         selectRef(refs[next].idx, false);
         const tr = tableEl.querySelector(`tr[data-idx="${refs[next].idx}"]`);
-        if (tr) { tr.focus({ preventScroll: true }); tr.scrollIntoView({ block: "nearest" }); }
+        const btn = tr && tr.querySelector(".row-link");
+        if (btn) { btn.focus({ preventScroll: true }); tr.scrollIntoView({ block: "nearest" }); }
         e.preventDefault();
       } else if (e.key === "Enter" && pos >= 0 && !(e.target && e.target.closest && e.target.closest("tr"))) {
         selectRef(refs[pos].idx, true);
@@ -1888,11 +2047,11 @@
     const isAdmin = S.user.role === "admin";
     const listEl = h("div", null, skeleton(4));
     const pagerEl = h("div", { class: "row-between mt-md" });
-    const search = h("input", { class: "search-pill", type: "search", placeholder: "Search by title or file name…", "aria-label": "Search runs", value: historyState.q });
+    const search = h("input", { class: "search-pill", type: "search", placeholder: "Search by title or file name…", "aria-label": "Search runs", value: historyState.q, autocorrect: "off", autocapitalize: "none", spellcheck: "false" });
     search.style.flex = "1 1 240px";
     search.addEventListener("input", debounce(() => { historyState.q = search.value; historyState.offset = 0; load(); }, 300));
     const statuses = [["", "All"], ["running", "Running"], ["done", "Done"], ["failed", "Failed"], ["cancelled", "Cancelled"], ["interrupted", "Interrupted"], ["queued", "Queued"]];
-    const pills = h("div", { class: "pill-tabs pill-tabs-sm", role: "toolbar", "aria-label": "Filter by status" },
+    const pills = h("div", { class: "pill-tabs pill-tabs-sm", role: "group", "aria-label": "Filter by status" },
       statuses.map(([v, l]) => h("button", {
         type: "button", class: "pill-tab", "aria-pressed": String(historyState.status === v), dataset: { v },
         onclick: () => {
@@ -1908,7 +2067,7 @@
       h("div", { class: "page-head" },
         h("div", null, h("h1", { class: "heading-lg" }, "History"), h("p", { class: "muted" }, "Every check you have run, with its results kept for review.")),
         h("a", { class: "btn btn-primary", href: "#/" }, "New check")),
-      h("div", { class: "toolbar" }, search, allSw ? allSw.el : null),
+      h("search", { class: "toolbar" }, search, allSw ? allSw.el : null),
       h("div", { class: "toolbar" }, pills),
       listEl, pagerEl));
 
@@ -2033,7 +2192,7 @@
       }
       card.appendChild(h("div", { class: "card-head" },
         h("div", { class: "grow" },
-          h("div", { class: "row" }, h("h3", { class: "card-title", id: `db-${d.key}` }, d.label), dbStatusBadge(d)),
+          h("div", { class: "row" }, h("h2", { class: "card-title", id: `db-${d.key}` }, d.label), dbStatusBadge(d)),
           d.description ? h("p", { class: "caption" }, d.description) : null),
         actions));
       if (isAdmin) card.appendChild(h("div", { class: "row" },
@@ -2064,7 +2223,7 @@
       if (sources.length) {
         const sorted = sources.slice().sort((a, b) => String(a.source).localeCompare(String(b.source)));
         card.appendChild(h("details", null,
-          h("summary", { class: "label", style: { cursor: "pointer" } }, `${plural(sources.length, "source")} in the corpus`),
+          h("summary", { class: "label" }, `${plural(sources.length, "source")} in the corpus`),
           h("div", { class: "table-wrap mt-sm", style: { maxHeight: "320px", overflowY: "auto" } }, h("table", { class: "data compact" },
             h("thead", null, h("tr", null, h("th", null, "Source tag"), h("th", { class: "num" }, "Records"))),
             h("tbody", null, sorted.map((s) => h("tr", null, h("td", null, h("code", null, s.source)), h("td", { class: "num" }, fmtNum(s.count)))))))));
@@ -2076,7 +2235,7 @@
       const ms = data.marked_safe_count || 0;
       const disabled = !data.cli_available || !!d.active_job;
 
-      const venueSel = h("select", { class: "input", "aria-label": "Venue" },
+      const venueSel = h("select", { class: "input" },
         venues.map((v) => h("option", { value: v.key, title: v.about || "" }, `${v.key}${v.about ? " — " + truncateText(v.about, 70) : ""}`)));
       const urlIn = h("input", { class: "input", type: "url", placeholder: "https://…", autocomplete: "off" });
       const pathIn = h("input", { class: "input mono", placeholder: "/path/on/server/proceedings.pdf", autocomplete: "off" });
@@ -2101,21 +2260,22 @@
         class: "stack", novalidate: true,
         onsubmit: async (e) => {
           e.preventDefault();
-          errEl.classList.add("hidden");
+          clearFieldErrors(errEl, [venueSel, tagIn, pathIn, urlIn]);
           const v = curVenue();
           const tag = tagIn.value.trim();
           const body = { venue: v ? v.key : "", source_tag: tag };
           let msg = null;
-          if (!v) msg = "Choose a venue.";
-          else if (!SOURCE_TAG_RE.test(tag)) msg = "Source tag must be 1–64 characters: letters, digits, _ . : -";
+          let bad = null;
+          if (!v) { msg = "Choose a venue."; bad = venueSel; }
+          else if (!SOURCE_TAG_RE.test(tag)) { msg = "Source tag must be 1–64 characters: letters, digits, _ . : -"; bad = tagIn; }
           else if (v.input === "pdf") {
-            if (!pathIn.value.trim()) msg = "Enter the PDF path on the server.";
+            if (!pathIn.value.trim()) { msg = "Enter the PDF path on the server."; bad = pathIn; }
             body.pdf_path = pathIn.value.trim();
           } else {
-            if (!isHttpUrl(urlIn.value)) msg = "Enter an http(s) URL.";
+            if (!isHttpUrl(urlIn.value)) { msg = "Enter an http(s) URL."; bad = urlIn; }
             body.url = urlIn.value.trim();
           }
-          if (msg) { errEl.textContent = msg; errEl.classList.remove("hidden"); return; }
+          if (msg) { setFieldError(errEl, msg, bad); return; }
           submit.disabled = true;
           try {
             const res = await api("POST", "/api/databases/corpus/import", body);
@@ -2177,8 +2337,7 @@
           required: !!p.required,
         });
         inputs[p.name] = input;
-        return h("label", { class: "field" }, h("span", null, p.label || p.name, p.required ? "" : h("span", { class: "stone" }, " (optional)")), input,
-          p.help ? h("small", { class: "field-hint" }, p.help) : null);
+        return field([p.label || p.name, p.required ? "" : h("span", { class: "stone" }, " (optional)")], input, p.help);
       });
       const go = h("button", { type: "button", class: "btn btn-primary" }, d.exists ? "Start update" : "Start build");
       const cancel = h("button", { type: "button", class: "btn btn-tertiary", onclick: () => m.close() }, "Cancel");
@@ -2192,12 +2351,12 @@
         actions: [cancel, go],
       });
       go.addEventListener("click", async () => {
-        errEl.classList.add("hidden");
+        clearFieldErrors(errEl, Object.values(inputs));
         for (const p of params) {
           const inp = inputs[p.name];
           if (p.kind === "bool") { if (inp.checked) values[p.name] = true; continue; }
           const v = inp.value.trim();
-          if (p.required && !v) { errEl.textContent = `${p.label || p.name} is required.`; errEl.classList.remove("hidden"); inp.focus(); return; }
+          if (p.required && !v) { setFieldError(errEl, `${p.label || p.name} is required.`, inp); return; }
           if (v) values[p.name] = p.kind === "number" ? Number(v) : v;
         }
         go.disabled = true;
@@ -2263,7 +2422,7 @@
   /** Live job log modal (SSE /api/jobs/:id/events, falling back to GET). */
   function openJobLog(jobId, onFinished) {
     const isAdmin = S.user && S.user.role === "admin";
-    const pane = h("pre", { class: "log-pane", tabindex: "0", "aria-label": "Job log", "aria-live": "off" });
+    const pane = h("pre", { class: "log-pane", tabindex: "0", role: "region", "aria-label": "Job log", "aria-live": "off" });
     const statusEl = h("span");
     const argvEl = h("code", { class: "small break" });
     const cancelBtn = h("button", { type: "button", class: "btn btn-danger btn-sm hidden" }, "Cancel job");
@@ -2397,9 +2556,9 @@
   }
 
   function showNewToken(secret, name) {
-    const field = h("input", { class: "input mono", readonly: true, value: secret, "aria-label": "New API token", spellcheck: "false", style: { flex: "1", minWidth: "0" } });
+    const tokenField = h("input", { class: "input mono", readonly: true, value: secret, "aria-label": "New API token", spellcheck: "false", style: { flex: "1", minWidth: "0" } });
     const copy = async () => {
-      field.select();
+      tokenField.select();
       let copied = false;
       try {
         if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(secret); copied = true; }
@@ -2412,13 +2571,13 @@
       title: `Token “${name}” created`,
       body: h("div", { class: "stack" },
         h("div", { class: "banner banner-warn" }, "Copy it now: it is shown only once and cannot be recovered."),
-        h("div", { class: "row", style: { flexWrap: "nowrap" } }, field,
+        h("div", { class: "row", style: { flexWrap: "nowrap" } }, tokenField,
           h("button", { type: "button", class: "btn btn-secondary btn-sm", onclick: copy }, "Copy")),
         h("p", { class: "muted small" }, "Send it as ", h("code", null, "Authorization: Bearer <token>"), ". See the ",
           docsLink(), ".")),
       actions: [done],
     });
-    setTimeout(() => field.select(), 0);
+    setTimeout(() => tokenField.select(), 0);
   }
 
   function viewAdmin(root, ctx) {
@@ -2436,7 +2595,7 @@
     const auditKind = h("select", { class: "input input-sm", "aria-label": "Kind", onchange: () => loadAudit() },
       h("option", { value: "" }, "Agents and people"), h("option", { value: "agent" }, "Agents"), h("option", { value: "person" }, "People"));
 
-    const uIn = h("input", { class: "input", autocomplete: "off", autocapitalize: "off", spellcheck: "false", maxlength: "32", placeholder: "username" });
+    const uIn = h("input", { class: "input", autocomplete: "off", autocapitalize: "none", autocorrect: "off", spellcheck: "false", maxlength: "32", placeholder: "username" });
     const pIn = h("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: "at least 10 characters" });
     const roleSel = h("select", { class: "input" }, h("option", { value: "user" }, "User"), h("option", { value: "admin" }, "Administrator"));
     const cErr = h("p", { class: "field-error hidden", role: "alert" });
@@ -2444,19 +2603,17 @@
       class: "card stack", novalidate: true,
       onsubmit: async (e) => {
         e.preventDefault();
-        cErr.classList.add("hidden");
+        clearFieldErrors(cErr, [uIn, pIn]);
         const username = uIn.value.trim();
         const password = pIn.value;
-        let msg = null;
-        if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) msg = "Username must be 3–32 characters: letters, digits, _ . -";
-        else if (password.length < 10 || password.length > 256) msg = "Password must be between 10 and 256 characters.";
-        if (msg) { cErr.textContent = msg; cErr.classList.remove("hidden"); return; }
+        if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) { setFieldError(cErr, "Username must be 3–32 characters: letters, digits, _ . -", uIn); return; }
+        if (password.length < 10 || password.length > 256) { setFieldError(cErr, "Password must be between 10 and 256 characters.", pIn); return; }
         try {
           await api("POST", "/api/admin/users", { username, password, role: roleSel.value });
           toast(`User ${username} created.`, "success");
           createForm.reset();
           loadUsers();
-        } catch (err) { cErr.textContent = err.message; cErr.classList.remove("hidden"); }
+        } catch (err) { setFieldError(cErr, err.message); }
       },
     },
       h("h3", { class: "card-title" }, "Create user"),
@@ -2648,7 +2805,7 @@
     const profileEl = h("div");
     const render = (u) => {
       replace(profileEl, h("div", { class: "card" },
-        h("div", { class: "row" }, h("span", { class: "avatar", style: { width: "48px", height: "48px", fontSize: "20px" } }, (u.username || "?").slice(0, 1)),
+        h("div", { class: "row" }, h("span", { class: "avatar", "aria-hidden": "true", style: { minWidth: "48px", minHeight: "48px", fontSize: "1.25rem" } }, (u.username || "?").slice(0, 1)),
           h("div", null, h("div", { class: "card-title" }, u.username), h("div", { class: "row" },
             u.role === "admin" ? badge("Administrator", "badge-dark badge-sm") : badge("User", "badge-outline badge-sm"),
             u.status === "active" ? badge("Active", "badge-success badge-sm") : badge(u.status, "badge-warn badge-sm")))),
@@ -2673,27 +2830,27 @@
       class: "card stack", novalidate: true,
       onsubmit: async (e) => {
         e.preventDefault();
-        err.classList.add("hidden");
+        clearFieldErrors(err, [cur, nw, nw2]);
         let msg = null;
-        if (!cur.value) msg = "Enter your current password.";
-        else if (nw.value.length < 10 || nw.value.length > 256) msg = "New password must be between 10 and 256 characters.";
-        else if (nw.value !== nw2.value) msg = "New passwords do not match.";
-        else if (nw.value === cur.value) msg = "The new password must differ from the current one.";
-        if (msg) { err.textContent = msg; err.classList.remove("hidden"); return; }
+        let bad = null;
+        if (!cur.value) { msg = "Enter your current password."; bad = cur; }
+        else if (nw.value.length < 10 || nw.value.length > 256) { msg = "New password must be between 10 and 256 characters."; bad = nw; }
+        else if (nw.value !== nw2.value) { msg = "New passwords do not match."; bad = nw2; }
+        else if (nw.value === cur.value) { msg = "The new password must differ from the current one."; bad = nw; }
+        if (msg) { setFieldError(err, msg, bad); return; }
         btn.disabled = true;
         try {
           await api("POST", "/api/auth/password", { current_password: cur.value, new_password: nw.value });
           form.reset();
           toast("Password changed. Other sessions were signed out.", "success");
         } catch (ex) {
-          err.textContent = ex.message;
-          err.classList.remove("hidden");
+          setFieldError(err, ex.message);
         } finally { btn.disabled = false; }
       },
     },
       h("h2", { class: "card-title" }, "Change password"),
       h("label", { class: "field" }, h("span", null, "Current password"), cur),
-      h("label", { class: "field" }, h("span", null, "New password"), nw, h("small", { class: "field-hint" }, "At least 10 characters. Changing it signs out your other sessions.")),
+      field("New password", nw, "At least 10 characters. Changing it signs out your other sessions."),
       h("label", { class: "field" }, h("span", null, "Confirm new password"), nw2),
       err, h("div", null, btn));
 
@@ -2708,9 +2865,9 @@
       class: "card stack", novalidate: true,
       onsubmit: async (e) => {
         e.preventDefault();
-        tErr.classList.add("hidden");
+        clearFieldErrors(tErr, [tName]);
         const name = tName.value.trim();
-        if (!name || name.length > 64) { tErr.textContent = "Give the token a name (up to 64 characters)."; tErr.classList.remove("hidden"); return; }
+        if (!name || name.length > 64) { setFieldError(tErr, "Give the token a name (up to 64 characters).", tName); return; }
         tBtn.disabled = true;
         try {
           const res = await api("POST", "/api/tokens", { name, expires_in_days: tExp.value ? Number(tExp.value) : null });
@@ -2718,13 +2875,12 @@
           showNewToken(res.secret, res.token.name);
           loadTokens();
         } catch (ex) {
-          tErr.textContent = ex.message;
-          tErr.classList.remove("hidden");
+          setFieldError(tErr, ex.message);
         } finally { tBtn.disabled = false; }
       },
     },
       h("div", { class: "row-between" }, h("h2", { class: "card-title" }, "API tokens"),
-        docsLink("small")),
+        docsLink("small tap")),
       h("p", { class: "muted small" }, "Scripts and agents use a token instead of your password: send it as ",
         h("code", null, "Authorization: Bearer <token>"), ". A token acts with your permissions, but cannot change your password or create tokens."),
       tokensEl,
@@ -2756,18 +2912,20 @@
   function encryptionKeyCard() {
     const st = HalluE2E.state;
     if (!HalluE2E.tunnel()) return null;
-    const input = h("input", { class: "input mono", type: "password", autocomplete: "off", spellcheck: "false", placeholder: "New key (cek1_…)", style: { flex: "1 1 240px" } });
+    // An E2E key, not a sign-in password: no password-manager autofill, no
+    // text correction.
+    const input = h("input", { class: "input mono", type: "password", autocomplete: "off", autocapitalize: "none", autocorrect: "off", spellcheck: "false", placeholder: "cek1_…" });
     const err = h("p", { class: "field-error hidden", role: "alert" });
     const save = async (e) => {
       e.preventDefault();
-      err.classList.add("hidden");
-      if (!input.value.trim()) return;
+      clearFieldErrors(err, [input]);
+      if (!input.value.trim()) { setFieldError(err, "Enter the new encryption key.", input); return; }
       try {
         await HalluE2E.enterKey(input.value);
         input.value = "";
         toast("Encryption key saved.", "success");
-        route();
-      } catch (ex) { err.textContent = ex.message; err.classList.remove("hidden"); }
+        route(true);
+      } catch (ex) { setFieldError(err, ex.message, input); }
     };
     const forget = async () => {
       const ok = await confirmDialog({ title: "Forget the encryption key?", message: "This signs you out on this device. To sign in again, enter the key again.", confirmLabel: "Forget key and sign out", danger: true });
@@ -2776,12 +2934,13 @@
       location.href = "/login";
     };
     return h("form", { class: "card stack", novalidate: true, onsubmit: save },
-      h("div", { class: "row-between" }, h("h3", { class: "card-title" }, "Encryption key"), badge("Set on this device", "badge-success badge-sm")),
+      h("div", { class: "row-between" }, h("h2", { class: "card-title" }, "Encryption key"), badge("Set on this device", "badge-success badge-sm")),
       h("p", { class: "muted small" }, "Every request from this browser is encrypted end to end with the server's key. ",
         st.kid ? ["Key id ", h("code", null, st.kid), "."] : null),
       st.rotate ? h("div", { class: "banner banner-warn" }, "The server has a new encryption key. Enter it below.") : null,
       st.backend === "noble" ? h("div", { class: "banner banner-info" }, "This page is on plain http, so the browser cannot lock the key away: scripts on this site can read it. Use https for stronger protection.") : null,
-      h("div", { class: "row" }, input,
+      field("New encryption key", input),
+      h("div", { class: "row" },
         h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Replace key"),
         h("button", { type: "button", class: "btn btn-tertiary btn-sm", onclick: forget }, "Forget key")),
       err);

@@ -21,6 +21,18 @@
     show(el, !!msg);
   }
 
+  /** Show an error for one field: mark it invalid and link the message to it. */
+  function fieldError(el, msg, input) {
+    setError(el, msg);
+    input.setAttribute("aria-invalid", "true");
+    input.setAttribute("aria-describedby", el.id);
+    input.addEventListener("input", () => input.removeAttribute("aria-invalid"), { once: true });
+  }
+
+  function clearFields(...inputs) {
+    for (const i of inputs) { i.removeAttribute("aria-invalid"); i.removeAttribute("aria-describedby"); }
+  }
+
   function setNotice(msg, kind) {
     const el = $("notice");
     el.className = "banner banner-" + (kind || "info") + (msg ? "" : " hidden");
@@ -93,10 +105,13 @@
     const err = $("si-error");
     setError(err, "");
     setNotice("");
+    clearFields($("si-username"), $("si-password"));
     const username = $("si-username").value.trim();
     const password = $("si-password").value;
     if (!username || !password) {
-      setError(err, "Enter your username and password.");
+      const empty = !username ? $("si-username") : $("si-password");
+      fieldError(err, "Enter your username and password.", empty);
+      empty.focus();
       return;
     }
     const btn = $("si-submit");
@@ -113,10 +128,12 @@
         $("si-password").value = "";
         showLockout(msg, retryAfterOf(res, data), [$("si-submit")]);
       } else {
-        setError(err, msg);
         if (res.status === 401) {
+          fieldError(err, msg, $("si-password"));
           $("si-password").value = "";
           $("si-password").focus();
+        } else {
+          setError(err, msg);
         }
       }
     } catch (e) {
@@ -135,7 +152,10 @@
     show($("form-signin"), false);
     show($("form-key"), true);
     show($("key-plain-http"), HalluE2E.state.backend === "noble");
-    setError($("key-error"), msg && msg !== HalluE2E.message("required") ? msg : "");
+    const keyMsg = msg && msg !== HalluE2E.message("required") ? msg : "";
+    clearFields($("key-value"));
+    if (keyMsg) fieldError($("key-error"), keyMsg, $("key-value"));
+    else setError($("key-error"), "");
     $("key-value").focus();
   }
 
@@ -151,9 +171,11 @@
     e.preventDefault();
     const err = $("key-error");
     setError(err, "");
+    clearFields($("key-value"));
     const value = $("key-value").value;
     if (!value.trim()) {
-      setError(err, "Enter the encryption key.");
+      fieldError(err, "Enter the encryption key.", $("key-value"));
+      $("key-value").focus();
       return;
     }
     const btn = $("key-submit");
@@ -165,7 +187,7 @@
       if (await signedIn()) return;
       showSignin();
     } catch (ex) {
-      setError(err, ex.message || String(ex));
+      fieldError(err, ex.message || String(ex), $("key-value"));
     } finally {
       btn.disabled = false;
     }

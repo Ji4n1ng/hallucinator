@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
   <title>Hallucinator</title>
   <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -14,13 +15,13 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <a class="sr-only" href="#app">Skip to content</a>
+  <a class="sr-only skip-link" href="#app">Skip to content</a>
 
   <header class="topnav">
     <div class="topnav-inner">
-      <button type="button" class="btn-icon nav-toggle" id="nav-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="navlinks">&#9776;</button>
+      <button type="button" class="btn-icon nav-toggle" id="nav-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="navlinks"><span aria-hidden="true">&#9776;</span></button>
       <a class="brand" href="#/">
-        <img src="/static/logo.svg" alt="">
+        <img src="/static/logo.svg" alt="" width="28" height="28">
         <span>Hallucinator</span>
       </a>
       <nav class="navlinks" id="navlinks" aria-label="Main">
@@ -31,11 +32,11 @@
       </nav>
       <div class="nav-right">
         <button type="button" class="user-pill" id="user-pill" aria-haspopup="menu" aria-expanded="false" aria-controls="user-menu">
-          <span class="avatar" id="user-avatar">?</span>
+          <span class="avatar" id="user-avatar" aria-hidden="true">?</span>
           <span class="uname truncate" id="user-name">…</span>
         </button>
         <div class="menu hidden" id="user-menu" role="menu" aria-labelledby="user-pill">
-          <div class="menu-label" id="user-menu-label"></div>
+          <div class="menu-label" id="user-menu-label" role="none"></div>
           <a class="menu-item" role="menuitem" href="#/account">Account</a>
           <a class="menu-item hidden" role="menuitem" href="#/admin" id="menu-admin">Admin</a>
           <div class="menu-sep" role="separator"></div>
@@ -45,7 +46,7 @@
     </div>
   </header>
 
-  <main id="app" tabindex="-1" aria-live="polite" aria-busy="true">
+  <main id="app" tabindex="-1" aria-busy="true">
     <div class="container page">
       <div class="skel skel-block"></div>
       <div class="skel skel-line"></div>
