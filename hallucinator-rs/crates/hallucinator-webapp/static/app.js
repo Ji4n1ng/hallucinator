@@ -274,6 +274,7 @@
         toKey(e.code);
         throw new ApiError(0, e.message);
       }
+      if (e && e.gateway) throw new ApiError(0, e.message); // a sign-in gateway (e2e.js GatewayError)
       throw new ApiError(0, "Network error — could not reach the server.");
     }
   }

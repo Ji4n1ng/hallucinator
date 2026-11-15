@@ -138,6 +138,7 @@
       }
     } catch (e) {
       if (e instanceof HalluE2E.E2EError) showKeyStep(e.message);
+      else if (e && e.gateway) setError(err, e.message); // a sign-in gateway (e2e.js GatewayError)
       else setError(err, "Network error — is the server running?");
     } finally {
       btn.textContent = "Sign in";
@@ -238,7 +239,7 @@
         showKeyStep(e.message);
         return;
       }
-      setNotice("Could not reach the server.", "error");
+      setNotice(e && e.gateway ? e.message : "Could not reach the server.", "error");
     }
     if (params.get("expired")) setNotice("Your session expired. Please sign in again.", "info");
     $("si-username").focus();

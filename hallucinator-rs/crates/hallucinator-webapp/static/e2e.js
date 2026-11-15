@@ -34,6 +34,16 @@
 
   class BadKey extends Error {}
 
+  /** A sign-in gateway in front of the server (Cloudflare Access) sent a plain call to its sign-in page. */
+  // app.js and login.js test `e.gateway`, not the class: that also works while
+  // a cache still hands out an older e2e.js next to a newer page script.
+  class GatewayError extends Error {
+    constructor() {
+      super("The sign-in page in front of Hallucinator stopped the request. Reload the page to sign in again.");
+      this.gateway = true;
+    }
+  }
+
   /** An envelope that was refused: by the server (its `e2e` code) or here. */
   class E2EError extends Error {
     constructor(code, detail) {
@@ -253,12 +263,23 @@
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
+  // Options of the plain calls (the tunnel and the health check).
+  // credentials "same-origin": a sign-in gateway in front of the server
+  // (Cloudflare Access) needs its own cookie, or it sends the call to its
+  // sign-in page. The server ends a session cookie that comes plain next to an
+  // envelope (src/e2e.rs), so none stays in the browser.
+  // redirect "manual": a redirect means that gateway (the server never
+  // redirects these calls). Following it to another origin fails as a network
+  // error, which says nothing useful.
+  const OUTER = { credentials: "same-origin", redirect: "manual", cache: "no-store" };
+
   /** POST the envelope. With `onUploadProgress`, by XMLHttpRequest, which reports upload progress. */
   function post(sealed, onUploadProgress) {
     if (!onUploadProgress) {
-      // No cookies: an old plain-mode session cookie must not travel next to the envelope.
-      return fetch(TUNNEL, { method: "POST", credentials: "omit", cache: "no-store", headers: { "Content-Type": CONTENT_TYPE }, body: sealed })
-        .then(async (res) => ({ status: res.status, type: res.headers.get("content-type"), body: new Uint8Array(await res.arrayBuffer()) }));
+      return fetch(TUNNEL, { method: "POST", ...OUTER, headers: { "Content-Type": CONTENT_TYPE }, body: sealed }).then(async (res) => {
+        if (res.type === "opaqueredirect") throw new GatewayError();
+        return { status: res.status, type: res.headers.get("content-type"), body: new Uint8Array(await res.arrayBuffer()) };
+      });
     }
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -347,7 +368,8 @@
 
   async function health() {
     try {
-      const res = await fetch("/api/health", { credentials: "omit", cache: "no-store" });
+      const res = await fetch("/api/health", OUTER);
+      if (res.type === "opaqueredirect") return { gateway: true };
       const data = await res.json();
       const e2e = (data && data.e2e) || {};
       return { required: e2e.required === true, kids: Array.isArray(e2e.kids) ? e2e.kids : [] };
@@ -359,10 +381,12 @@
   // Whether /api/health has answered. Until it has, nothing goes plain: a
   // sign-in must not send a password plain to a server that needs a key.
   let healthKnown = false;
+  let gatewaySeen = false; // the last health check went to a sign-in gateway
 
   async function learnMode() {
     const h = await health();
-    if (!h) return false;
+    gatewaySeen = !!(h && h.gateway);
+    if (!h || h.gateway) return false;
     healthKnown = true;
     if (h.required && !entry) {
       entry = { origin };
@@ -431,7 +455,7 @@
     await ready;
     const method = (init.method || "GET").toUpperCase();
     if (state.mode === "plain" && !healthKnown && !(await learnMode())) {
-      throw new TypeError("The server can't be reached.");
+      throw gatewaySeen ? new GatewayError() : new TypeError("The server can't be reached.");
     }
     if (state.mode === "plain") {
       const res = init.onUploadProgress
@@ -483,6 +507,7 @@
     const master = parseKey(text);
     const h = await health();
     if (!h) throw new Error("The server can't be reached. Try again.");
+    if (h.gateway) throw new GatewayError();
     const key = await deriveKey(master, pickBackend());
     if (!h.kids.includes(hex(key.kid))) throw new BadKey(MESSAGES.unknown_kid);
     entry = Object.assign({}, entry || { origin }, { key });
@@ -557,6 +582,7 @@
     openText,
     E2EError,
     BadKey,
+    GatewayError,
     // For tests (static/e2e.test.mjs) and debugging; no secrets.
     _internal: { parseKey, deriveKey, seal, open, packPlaintext, unpackPlaintext, innerPlaintext, hex, REQUEST, RESPONSE },
   };

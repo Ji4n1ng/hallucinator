@@ -72,4 +72,35 @@ for (const bad of vectors.bad_keys) {
 const inner = unpackPlaintext(E._internal.innerPlaintext({ method: "get", path: "/api/x", headers: { Authorization: "Bearer t", "X-CSRF-Token": "c" } }));
 assert.deepEqual(inner.meta, { m: "GET", p: "/api/x", h: { authorization: "Bearer t" } });
 assert.equal(utf8.encode("").length, inner.body.length);
-console.log(`e2e-web: ${checks + 1} checks passed (subtle and noble)`);
+checks++;
+
+// A sign-in gateway in front of the server (Cloudflare Access): the plain calls
+// send the browser's cookies, and the gateway's redirect gets its own error,
+// not "can't be reached".
+const calls = [];
+let server = async () => gateway;
+globalThis.fetch = async (url, init) => {
+  calls.push({ url, init });
+  return server(url, init);
+};
+const gateway = { type: "opaqueredirect", status: 0, headers: new Headers() };
+const outerOptions = () => {
+  assert.ok(calls.length > 0);
+  for (const { init } of calls) assert.deepEqual([init.credentials, init.redirect], ["same-origin", "manual"]);
+  calls.length = 0;
+};
+const k = vectors.keys[0];
+await assert.rejects(E.fetch("/api/auth/me"), E.GatewayError);
+outerOptions();
+await assert.rejects(E.enterKey(k.key), E.GatewayError);
+outerOptions();
+server = async () => new Response(JSON.stringify({ ok: true, e2e: { required: true, kids: [k.kid] } }));
+await E.enterKey(k.key);
+assert.ok(E.tunnel() && E.state.kid === k.kid);
+outerOptions();
+server = async () => gateway;
+await assert.rejects(E.fetch("/api/auth/me"), E.GatewayError);
+assert.equal(calls[0].url, "/api/e2e");
+outerOptions();
+checks += 3;
+console.log(`e2e-web: ${checks} checks passed (subtle and noble)`);
