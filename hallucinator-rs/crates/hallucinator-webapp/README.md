@@ -174,7 +174,8 @@ For anything beyond localhost put it behind a TLS reverse proxy and run with
   its session.
 - Audit log of every agent call and every change (Admin page,
   `GET /api/admin/audit`), kept 90 days; no query strings or bodies.
-- Strict CSP (no inline script), `nosniff`, `frame-ancestors 'none'`; the UI
+- Strict CSP (no inline script; scripts, styles and fonts only from our own
+  origin), `nosniff`, `frame-ancestors 'none'`; the UI
   never inserts server data as HTML; exports are served as sandboxed
   attachments; uploads are validated, kept in a temp dir only while being
   extracted, and never stored.
@@ -198,7 +199,9 @@ src/
   jobs.rs     hallucinator-cli child processes for updates/imports
   export.rs   exports through hallucinator-reporting
   model.rs    serde mirror of ValidationResult, stats
-static/       dependency-free UI (no build step), follows DESIGN.md
+static/       dependency-free UI (no build step), follows DESIGN.md; DM Sans is
+              self-hosted here (OFL, dm-sans-OFL.txt). Each file is listed in
+              ASSETS in src/api/mod.rs, which embeds and serves it
 API-GUIDE.md  agent/script guide, served at /api/docs
 deploy/       systemd user-service installer
 ```

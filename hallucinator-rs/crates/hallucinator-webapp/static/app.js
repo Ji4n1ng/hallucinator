@@ -611,6 +611,10 @@
     rate_limited: "Rate limited", error: "Error", skipped: "Skipped",
   };
 
+  // Where the server found a database path. Shown as text, not in a title:
+  // keyboard and touch users cannot open a title (spec web-design, section 4).
+  const PATH_SOURCE_LABELS = { env: "From an environment variable", config: "From the config file", auto: "Auto-detected", default: "Default location (not built yet)" };
+
   const MISMATCH_LABELS = { author: "Author mismatch", doi: "DOI mismatch", arxiv_id: "arXiv ID mismatch" };
 
   const KIND_LABELS = { pdf: "PDF", bib: "BIB", bbl: "BBL", xml: "GROBID XML", "pdf+bib": "PDF + BIB", "pdf+bbl": "PDF + BBL" };
@@ -2198,7 +2202,7 @@
         actions));
       if (isAdmin) card.appendChild(h("div", { class: "row" },
         h("span", { class: "db-path grow" }, d.path || "(no path)"),
-        d.path_source ? badge(d.path_source, "badge-outline badge-sm", { env: "From an environment variable", config: "From the config file", auto: "Auto-detected", default: "Default location (not built yet)" }[d.path_source] || "") : null));
+        d.path_source ? badge(PATH_SOURCE_LABELS[d.path_source] || d.path_source, "badge-outline badge-sm") : null));
       const meta = h("div", { class: "meta-grid" });
       const addMeta = (label, val, title) => meta.appendChild(h("div", { title: title || null }, h("div", { class: "m-label" }, label), h("div", { class: "m-val" }, val)));
       addMeta("Size", d.exists ? fmtBytes(d.size_bytes) : "—");
@@ -2522,7 +2526,7 @@
 
   function tokenExpiry(t) {
     if (!t.expires_at) return h("span", { class: "stone" }, "Never");
-    if (t.expires_at <= nowSec()) return badge("Expired", "badge-error badge-sm", absTime(t.expires_at));
+    if (t.expires_at <= nowSec()) return h("span", { class: "row" }, badge("Expired", "badge-error badge-sm"), timeEl(t.expires_at));
     return timeEl(t.expires_at);
   }
 
@@ -2712,7 +2716,8 @@
           const statusB = u.status === "active" ? badge("Active", "badge-success badge-sm") : u.status === "pending" ? badge("Pending approval", "badge-warn badge-sm") : badge("Disabled", "badge-muted badge-sm");
           return h("tr", null,
             h("td", null, h("div", { class: "row" }, h("span", { class: "t-title" }, u.username), self ? badge("you", "badge-outline badge-sm") : null,
-              u.kind === "agent" ? badge("Agent", "badge-beta badge-sm", "A Catelier agent: signs in only with its token, never an administrator") : null)),
+              u.kind === "agent" ? badge("Agent", "badge-beta badge-sm") : null),
+              u.kind === "agent" ? h("div", { class: "t-sub t-note" }, "Catelier agent: signs in only with its token, never an administrator") : null),
             h("td", null, u.role === "admin" ? badge("Admin", "badge-dark badge-sm") : badge("User", "badge-outline badge-sm")),
             h("td", null, h("div", { class: "row" }, statusB, locked ? badge(`Locked until ${new Date(u.locked_until * 1000).toLocaleTimeString()}`, "badge-error badge-sm", absTime(u.locked_until)) : null)),
             h("td", { class: "nowrap" }, timeEl(u.last_login_at)),

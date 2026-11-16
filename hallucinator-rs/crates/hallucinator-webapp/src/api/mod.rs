@@ -163,6 +163,11 @@ const ASSETS: &[Asset] = &[
     asset!("e2e.js", "text/javascript; charset=utf-8"),
     asset!("noble.js", "text/javascript; charset=utf-8"),
     asset!("logo.svg", "image/svg+xml"),
+    // DM Sans, served from our own origin (Google Fonts is blocked in
+    // mainland China). The licence travels with the font files.
+    asset!("dm-sans-latin-opsz-normal.woff2", "font/woff2"),
+    asset!("dm-sans-latin-ext-opsz-normal.woff2", "font/woff2"),
+    asset!("dm-sans-OFL.txt", "text/plain; charset=utf-8"),
 ];
 
 fn asset_response(state: &AppState, name: &str) -> Response {
@@ -232,8 +237,8 @@ async fn security_headers(req: Request, next: Next) -> Response {
     set(
         h,
         "content-security-policy",
-        "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; \
-         font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; \
+        "default-src 'self'; script-src 'self'; style-src 'self'; \
+         font-src 'self'; img-src 'self' data:; connect-src 'self'; \
          frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
     );
     set(h, "x-content-type-options", "nosniff");

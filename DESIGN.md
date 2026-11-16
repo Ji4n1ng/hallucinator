@@ -16,20 +16,32 @@ colors:
   brand-cyan: "#3daeff"
   brand-blue-200: "#bfdbfe"
   brand-purple: "#a855f7"
+  card-coral: "#d93c18"
+  card-magenta: "#c03b98"
+  card-blue: "#1456f0"
+  card-purple: "#9333ea"
   canvas: "#ffffff"
   surface: "#f7f8fa"
   surface-soft: "#f2f3f5"
   hairline: "#e5e7eb"
   hairline-soft: "#eaecf0"
+  hairline-strong: "#b8bcc4"
+  control-border: "#8a909a"
+  focus: "#1d4ed8"
   ink: "#0a0a0a"
   ink-strong: "#000000"
   charcoal: "#222222"
   slate: "#45515e"
   steel: "#5f5f5f"
-  stone: "#8e8e93"
+  stone: "#6e6e73"
   muted: "#a8aab2"
   success-bg: "#e8ffea"
-  success-text: "#1ba673"
+  success-text: "#137a55"
+  error: "#c43c3c"
+  error-bg: "#fdeeee"
+  error-strong: "#9b3434"
+  warn-text: "#a15c00"
+  warn-bg: "#fff4e0"
   on-dark: "#ffffff"
   footer-bg: "#0a0a0a"
 
@@ -178,22 +190,22 @@ components:
     size: 36px
     border: "1px solid {colors.hairline}"
   product-card-coral:
-    backgroundColor: "{colors.brand-coral}"
+    backgroundColor: "{colors.card-coral}"
     textColor: "{colors.on-dark}"
     rounded: "{rounded.hero}"
     padding: "{spacing.xxl}"
   product-card-magenta:
-    backgroundColor: "{colors.brand-magenta}"
+    backgroundColor: "{colors.card-magenta}"
     textColor: "{colors.on-dark}"
     rounded: "{rounded.hero}"
     padding: "{spacing.xxl}"
   product-card-blue:
-    backgroundColor: "{colors.brand-blue}"
+    backgroundColor: "{colors.card-blue}"
     textColor: "{colors.on-dark}"
     rounded: "{rounded.hero}"
     padding: "{spacing.xxl}"
   product-card-purple:
-    backgroundColor: "{colors.brand-purple}"
+    backgroundColor: "{colors.card-purple}"
     textColor: "{colors.on-dark}"
     rounded: "{rounded.hero}"
     padding: "{spacing.xxl}"
@@ -217,7 +229,7 @@ components:
     padding: "{spacing.lg}"
     border: "1px solid {colors.hairline}"
   promo-cta-card:
-    backgroundColor: "{colors.brand-coral}"
+    backgroundColor: "{colors.card-coral}"
     textColor: "{colors.on-dark}"
     rounded: "{rounded.hero}"
     padding: "{spacing.section}"
@@ -227,16 +239,16 @@ components:
     typography: "{typography.body-md}"
     rounded: "{rounded.md}"
     padding: "{spacing.sm} {spacing.md}"
-    border: "1px solid {colors.hairline}"
+    border: "1px solid {colors.control-border}"
     height: 40px
   text-input-focused:
     backgroundColor: "{colors.canvas}"
     textColor: "{colors.ink}"
-    border: "2px solid {colors.brand-blue-deep}"
+    border: "2px solid {colors.focus}"
   text-input-error:
     backgroundColor: "{colors.canvas}"
     textColor: "{colors.ink}"
-    border: "1px solid #d45656"
+    border: "1px solid {colors.error}"
   search-pill:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.steel}"
@@ -244,7 +256,7 @@ components:
     rounded: "{rounded.md}"
     padding: "{spacing.xs} {spacing.md}"
     height: 36px
-    border: "1px solid {colors.hairline}"
+    border: "1px solid {colors.control-border}"
   segmented-tab:
     backgroundColor: "transparent"
     textColor: "{colors.steel}"
@@ -276,7 +288,7 @@ components:
     rounded: "{rounded.full}"
     padding: "4px 10px"
   badge-new:
-    backgroundColor: "{colors.brand-coral}"
+    backgroundColor: "{colors.card-coral}"
     textColor: "{colors.on-dark}"
     typography: "{typography.caption-bold}"
     rounded: "{rounded.full}"
@@ -378,6 +390,29 @@ components:
     padding: "{spacing.xl}"
 ---
 
+## Hallucinator web app: rules that override the analysis
+
+This file started as an analysis of minimax.io. The Hallucinator web app (`hallucinator-rs/crates/hallucinator-webapp/static/`) uses its language, with the changes below. They come from the `web-design` spec (Modern Web Guidance, WCAG AA). `app.css` is the source of truth for the values. Keep this file and `app.css` the same.
+
+- **Contrast (WCAG AA).** Text has 4.5:1 or more against its background. Large text, icons, focus rings and the border of a field, checkbox or switch have 3:1 or more. Card and table lines (`{colors.hairline}`) do not need 3:1. A selected or checked state has 3:1 against the unselected state. A faded item keeps 4.5:1 text; only disabled controls are exempt.
+- **Changed tokens.** These analysis values failed AA and were changed. Do not bring them back:
+
+  | Token | Old value | Failed | New value | Now |
+  |---|---|---|---|---|
+  | `stone` (captions) | `#8e8e93` | 3.3:1 on white | `#6e6e73` | 5.1:1 |
+  | `success-text` | `#1ba673` | 2.9:1 on `success-bg` | `#137a55` | 5.0:1 |
+  | `error` (was not a token) | `#d45656` | 4.0:1 on white | `#c43c3c` | 5.2:1 |
+  | product-card fill, coral | `brand-coral` `#ff5530` | 3.2:1 under white text | `card-coral` `#d93c18` | 4.6:1 |
+  | product-card fill, magenta | `brand-magenta` `#ea5ec1` | 3.1:1 under white text | `card-magenta` `#c03b98` | 4.9:1 |
+  | product-card fill, purple | `brand-purple` `#a855f7` | 4.0:1 under white text | `card-purple` `#9333ea` | 5.4:1 |
+  | field border | `hairline` `#e5e7eb` | 1.2:1 on white | `control-border` `#8a909a` | 3.2:1 |
+
+- **Brand hues stay decorative.** `brand-coral`, `brand-magenta` and `brand-purple` are not fills under text. Use the `card-*` tokens for that. `card-blue` is `brand-blue` (5.8:1).
+- **Muted.** `{colors.muted}` is for footer text on `{colors.footer-bg}` (8.5:1) and disabled controls only. It is 2.3:1 on white.
+- **Dark scheme.** The app has one (see "Dark scheme" below). It redefines the same tokens under `prefers-color-scheme: dark`, with `color-scheme: light dark`.
+- **Font.** DM Sans comes from our own origin (`/static/dm-sans-*.woff2`, variable, latin and latin-ext, SIL Open Font License in `dm-sans-OFL.txt`). Do not load fonts from Google Fonts or another CDN: users in mainland China cannot reach them, and the page waits.
+- **Sizes.** The px sizes in this file are at a 16px root. The app sets font sizes in `rem`. Heights of controls that hold text are minimums (`min-block-size`), not fixed heights. Every click or tap target is 24 × 24 CSS px or more.
+
 ## Overview
 
 MiniMax stages itself as a Chinese AI infrastructure brand with a sophisticated dual identity. Marketing surfaces and platform pages anchor in stark white canvas with deep-black typographic emphasis — the brand voice is confident, technical, almost editorial. But each model release gets its own vibrant gradient identity card: M2.7 in volcanic coral-red, Music 2.6 in magenta-pink, Hailuo in deep blue, Speech 2.8 in saturated orange-purple. Together these vibrant tiles read like album covers laid out on the homepage — each one declaring its own product personality.
@@ -398,7 +433,7 @@ DM Sans anchors every surface from oversized 80px hero displays down to 12px mic
 > Source pages: minimax.io/ (homepage), /models/text/m27 (product showcase), platform.minimax.io/docs/guides/models-intro (documentation), /subscribe/token-plan (pricing). Token coverage was identical across all four pages.
 
 ### Brand & Accent
-- **Brand Coral** ({colors.brand-coral}): Signature high-impact accent. Used on M2.7 product card, "Token Plan" hero band, promo CTA strips, and "NEW" badges. Carries the brand's most attention-grabbing energy.
+- **Brand Coral** ({colors.brand-coral}): Signature high-impact accent. In the Hallucinator web app it is decorative only; a fill under white text uses **Card Coral** ({colors.card-coral}). Used on M2.7 product card, "Token Plan" hero band, promo CTA strips, and "NEW" badges. Carries the brand's most attention-grabbing energy.
 - **Brand Magenta** ({colors.brand-magenta}): Secondary product-card identity (Music 2.6); used for music/audio product encoding.
 - **Brand Blue** ({colors.brand-blue}): Hailuo video product identity; primary blue accent across the system.
 - **Brand Blue Deep** ({colors.brand-blue-deep}): Form-control activation, link emphasis.
@@ -407,11 +442,17 @@ DM Sans anchors every surface from oversized 80px hero displays down to 12px mic
 - **Brand Blue 200** ({colors.brand-blue-200}): Code badges, info-tag backgrounds.
 - **Brand Purple** ({colors.brand-purple}): Speech 2.8 and minor purple-product identity; gradient mate for magenta cards.
 
+### Product-card fills (AA)
+- **Card Coral** ({colors.card-coral}), **Card Magenta** ({colors.card-magenta}), **Card Blue** ({colors.card-blue}), **Card Purple** ({colors.card-purple}): the brand hues, darkened so that white text has 4.5:1 or more. Use these, not the `brand-*` hues, under text.
+
 ### Surface
 - **Canvas White** ({colors.canvas}): Primary page background and card surface.
 - **Surface** ({colors.surface}): Subtle section backgrounds, search-pill rest, sidebar-nav active state.
 - **Surface Soft** ({colors.surface-soft}): Quieter section divisions.
-- **Hairline** ({colors.hairline}): 1px input border and primary divider.
+- **Hairline** ({colors.hairline}): 1px card and table lines, primary divider. Not a field border: it is 1.2:1 on white.
+- **Hairline Strong** ({colors.hairline-strong}): Dashed outlines and stronger dividers.
+- **Control Border** ({colors.control-border}): Border of inputs, selects, checkboxes and the switch track (3:1 or more).
+- **Focus** ({colors.focus}): 2px focus ring and focused-field border.
 - **Hairline Soft** ({colors.hairline-soft}): Quieter table-row divider and secondary section break.
 
 ### Text
@@ -420,18 +461,19 @@ DM Sans anchors every surface from oversized 80px hero displays down to 12px mic
 - **Charcoal** ({colors.charcoal}): Body text on light surfaces.
 - **Slate** ({colors.slate}): Secondary text, metadata.
 - **Steel** ({colors.steel}): Tertiary text, table headers, sidebar inactive items.
-- **Stone** ({colors.stone}): Muted captions and tab inactive labels.
-- **Muted** ({colors.muted}): Footer link text and de-emphasized labels.
+- **Stone** ({colors.stone}): Muted captions and tab inactive labels (5.1:1 on white).
+- **Muted** ({colors.muted}): Footer link text on the dark footer and disabled controls only. Not for text on white.
 
 ### Semantic
 - **Success Background** ({colors.success-bg}): Pale-green wash for success badges and confirmations.
 - **Success Text** ({colors.success-text}): Deep-green ink for success badge labels.
-- Error tones derive from a `#d45656` red used in input border error states (not extracted as a top-level system token).
+- **Error** ({colors.error}): Error text, the border of a field with an error, and the danger button fill. **Error Background** ({colors.error-bg}) and **Error Strong** ({colors.error-strong}) are its wash and its darker ink.
+- **Warning Text** ({colors.warn-text}) on **Warning Background** ({colors.warn-bg}): warning badges and banners.
 
 ## Typography
 
 ### Font Family
-**DM Sans** (primary): Geometric variable sans-serif. Used across every surface, every role. Fallbacks: Inter, Helvetica Neue, Helvetica, Arial.
+**DM Sans** (primary): Geometric variable sans-serif. Used across every surface, every role. Fallbacks: Inter, Helvetica Neue, Helvetica, Arial. The Hallucinator web app serves it from its own origin (see the first section).
 
 DM Sans was chosen for its dual fluency: it scales cleanly from 80px hero displays (where -2px letter-spacing creates magazine-grade tightness) down to 12px micro labels (where the slightly humanist counters maintain legibility). The face has no italic variant in the brand's deployment — emphasis comes from weight (500/600/700) instead.
 
@@ -543,17 +585,17 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 ### Vibrant Product Cards
 
 **`product-card-coral`** — M2.7 / Token Plan signature card.
-- Background `{colors.brand-coral}`, text `{colors.on-dark}`, rounded `{rounded.hero}` (32px), padding `{spacing.xxl}`.
+- Background `{colors.card-coral}`, text `{colors.on-dark}`, rounded `{rounded.hero}` (32px), padding `{spacing.xxl}`.
 - Hosts the M2.7 wordmark in massive `{typography.display-lg}` with white tagline.
 
 **`product-card-magenta`** — Music 2.6 product showcase.
-- Background `{colors.brand-magenta}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.xxl}`.
+- Background `{colors.card-magenta}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.xxl}`.
 
 **`product-card-blue`** — Hailuo Video product showcase.
-- Background `{colors.brand-blue}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.xxl}`.
+- Background `{colors.card-blue}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.xxl}`.
 
 **`product-card-purple`** — Speech 2.8 / variant product showcase.
-- Background `{colors.brand-purple}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.xxl}`.
+- Background `{colors.card-purple}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.xxl}`.
 
 **`product-card-photo`** — Dark portrait product card (homepage S2 placement, video-emotion product).
 - Background `{colors.primary}` (black with overlaid product photo), text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.xxl}`.
@@ -570,7 +612,7 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 - Background `{colors.canvas}`, rounded `{rounded.lg}`, padding `{spacing.lg}`, border `1px solid {colors.hairline}`.
 
 **`promo-cta-card`** — Bright orange "Refunds of 10%..." promo strip with embedded CTA pill.
-- Background `{colors.brand-coral}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.section}`. Embedded button uses `button-tertiary` (white pill on coral) for the "Join Now" action.
+- Background `{colors.card-coral}`, text `{colors.on-dark}`, rounded `{rounded.hero}`, padding `{spacing.section}`. Embedded button uses `button-tertiary` (white pill on coral) for the "Join Now" action.
 
 **`ai-product-tile`** — White card in the AI Product Matrix grid (Agent, Hailuo Video, MiniMax Audio).
 - Background `{colors.canvas}`, rounded `{rounded.xxxl}`, padding `{spacing.xl}`, border `1px solid {colors.hairline}`. Carries an icon/illustration top, title `{typography.card-title}`, description `{typography.body-sm}`.
@@ -578,16 +620,16 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 ### Inputs & Forms
 
 **`text-input`** — Standard text field.
-- Background `{colors.canvas}`, text `{colors.ink}`, border `1px solid {colors.hairline}`, rounded `{rounded.md}`, padding `{spacing.sm} {spacing.md}`, height 40px.
+- Background `{colors.canvas}`, text `{colors.ink}`, border `1px solid {colors.control-border}`, rounded `{rounded.md}`, padding `{spacing.sm} {spacing.md}`, height 40px or more.
 
 **`text-input-focused`** — Activated state.
-- Border switches to `2px solid {colors.brand-blue-deep}`.
+- Border switches to `2px solid {colors.focus}`.
 
 **`text-input-error`** — Validation error state.
-- Border switches to `1px solid #d45656`; error label below in matching red `{typography.body-sm}`.
+- Border switches to `1px solid {colors.error}`; error label below in matching red `{typography.body-sm}`, linked to the field with `aria-describedby`.
 
 **`search-pill`** — Documentation top-bar search field.
-- Background `{colors.surface}`, text `{colors.steel}`, typography `{typography.body-sm}`, rounded `{rounded.md}`, height 36px, border `1px solid {colors.hairline}`.
+- Background `{colors.surface}`, text `{colors.steel}`, typography `{typography.body-sm}`, rounded `{rounded.md}`, height 36px or more, border `1px solid {colors.control-border}`.
 
 ### Tabs
 
@@ -604,7 +646,7 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 - Background `{colors.success-bg}`, text `{colors.success-text}`, typography `{typography.caption-bold}`, rounded `{rounded.full}`, padding `4px 10px`.
 
 **`badge-new`** — Coral "NEW" / "Live" pill for fresh releases.
-- Background `{colors.brand-coral}`, text `{colors.on-dark}`, typography `{typography.caption-bold}`, rounded `{rounded.full}`, padding `4px 10px`.
+- Background `{colors.card-coral}`, text `{colors.on-dark}`, typography `{typography.caption-bold}`, rounded `{rounded.full}`, padding `4px 10px`.
 
 **`badge-beta`** — Pale-blue "BETA" / informational pill.
 - Background `{colors.brand-blue-200}`, text `{colors.brand-blue-deep}`, typography `{typography.caption-bold}`, rounded `{rounded.full}`, padding `4px 10px`.
@@ -696,6 +738,10 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 - Don't reduce hero leading below 1.10 — the brand needs that breathing room on the 80px display.
 - Don't apply heavy shadows on white cards; flat-with-borders is the documentation default.
 - Don't put gradient backgrounds on standard buttons; gradients are reserved for product-card identity moments.
+- Don't put white text on `{colors.brand-coral}`, `{colors.brand-magenta}` or `{colors.brand-purple}`; use the `card-*` fills.
+- Don't use `{colors.hairline}` for the border of a field, checkbox or switch; use `{colors.control-border}`.
+- Don't use `{colors.muted}` for text on a light surface, and don't bring back the old `stone`, `success-text` or `#d45656` values.
+- Don't load DM Sans (or any font, script or style) from Google Fonts or another CDN.
 
 ## Responsive Behavior
 
@@ -709,6 +755,7 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 | Wide Desktop | ≥ 1280px | Wider hero gutters, larger product photography, fixed 220px sidebar. |
 
 ### Touch Targets
+- Every click or tap target is 24 × 24 CSS px or more (WCAG 2.5.8), including links in text rows, summary toggles and dismiss buttons.
 - Pill buttons render at 38–40px effective height — bumps to 44px on mobile via padding override.
 - Circular icon buttons: 36×36px desktop → 44×44px on mobile.
 - Form inputs render at 40px height; bumps to 44px on mobile.
@@ -732,7 +779,7 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 
 1. Focus on ONE component at a time. The system has high internal consistency.
 2. Reference component names and tokens directly (`{colors.primary}`, `{component-name}-pressed`, `{rounded.full}`) — do not paraphrase.
-3. Run `npx @google/design.md lint DESIGN.md` after edits to catch broken refs and contrast issues.
+3. Run `npx @google/design.md lint DESIGN.md` after edits to catch broken refs and contrast issues. Check each new colour pair in light and dark against the AA rules in the first section.
 4. Add new variants as separate `components:` entries (`-pressed`, `-disabled`, `-active`).
 5. Default to `{typography.body-md}` for body and `{typography.subtitle}` for emphasis. Headlines step down `hero-display → display-lg → heading-lg → heading-md → heading-sm`.
 6. Keep brand colors (coral, magenta, blue, purple) confined to product-card identity. If a brand color appears on a standard button or generic surface, ask whether it earned that surface.
@@ -740,7 +787,30 @@ The system runs predominantly flat. Elevation is reserved for sticky panels, dro
 
 ## Known Gaps
 
-- Specific dark-mode token values (canvas, surface, ink, hairline) are not surfaced on these pages; the brand has not yet shipped a published dark-mode palette.
+- Specific dark-mode token values are not surfaced on the minimax.io pages. The Hallucinator web app defines its own (see "Dark scheme").
 - Animation/transition timings are not extracted; recommend 150–200ms ease for hover/focus state transitions.
 - Form validation success state is not explicitly captured beyond defaults — implement following standard green-border + success badge patterns.
 - Code syntax highlighting palette inside docs is not formalized; documentation samples appear with system-default monospace and minimal coloring.
+
+## Dark scheme
+
+The Hallucinator web app redefines these tokens under `@media (prefers-color-scheme: dark)`. Tokens that are not listed keep their light values (for example the `card-*` fills, which carry white text in both schemes). Each text pair has 4.5:1 or more, and each control border and focus ring 3:1 or more.
+
+| Token | Dark value | Check |
+|---|---|---|
+| `primary` / `on-primary` | `#f0f3f6` / `#0d1117` | light pill, dark text |
+| `canvas` | `#0d1117` | page background |
+| `surface` / `surface-soft` | `#161b22` / `#1c2128` | |
+| `hairline` / `hairline-soft` / `hairline-strong` | `#30363d` / `#262c34` / `#4b535d` | card and table lines |
+| `control-border` | `#7d8590` | 5.1:1 on canvas |
+| `focus` (`brand-blue-deep`) | `#7aa7ff` | 7.9:1 on canvas |
+| `brand-blue-200` | `#172b4d` | badge-beta and badge-code fill (5.9:1 with `#7aa7ff`) |
+| `ink` / `charcoal` | `#f0f3f6` / `#d1d7e0` | 13.1:1 for charcoal |
+| `slate` / `steel` / `stone` | `#b7bec9` / `#9ea7b3` / `#8b949e` | stone 6.2:1 on canvas |
+| `muted` | `#6e7681` | disabled controls only |
+| `success-bg` / `success-text` | `#0f2e22` / `#3fb67f` | 5.7:1 |
+| `error` / `error-bg` / `error-strong` | `#f47067` / `#3a1517` / `#ffaba5` | 6.6:1 on canvas |
+| danger fill (`danger-bg`) | `#b83535` | 5.8:1 under white text |
+| `warn-text` / `warn-bg` | `#e0a03b` / `#33240a` | 6.6:1 |
+| `footer-bg` | `#010409` | |
+| backdrop | `rgba(0, 0, 0, 0.6)` | modal backdrop |
